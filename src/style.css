@@ -48,9 +48,16 @@ body {
 
 /* ---- room & props ---- */
 
-.layer-room, .layer-decals, .layer-props, .layer-ghosts, .layer-labels {
+.layer-room, .layer-decals, .layer-props, .layer-ghosts, .layer-labels, .layer-fx {
   pointer-events: none;
 }
+
+/* Placeable surface regions opt back into hit-testing so the drag pipeline's
+   elementsFromPoint walk can resolve them (CC-005); everything else in the
+   furniture layers stays click-through. */
+[data-surface] { pointer-events: auto; }
+/* items live in the merged props layer now — opt them back into hit-testing */
+.item { pointer-events: auto; }
 
 .item { cursor: grab; }
 .item.dragging { cursor: grabbing; }
@@ -75,6 +82,33 @@ body {
 @keyframes ghost-pulse {
   0%, 100% { transform: scale(1); }
   50% { transform: scale(1.08); }
+}
+
+/* surface ghosts (CC-005): physical fit only — soft teal for fit, dimmed with
+   a diagonal strike for no-fit; never collection colors (R4/A5) */
+.surface-ghost {
+  opacity: 0;
+  transition: opacity 0.13s ease;
+  pointer-events: none;
+}
+.surface-ghost.on { opacity: 1; }
+.surface-ghost .surface-ghost-shape {
+  fill: rgba(46, 122, 114, 0.1);
+  stroke: var(--teal, #2e7a72);
+  stroke-width: 0.032;
+  stroke-dasharray: 0.09 0.06;
+  stroke-linejoin: round;
+}
+.surface-ghost.no-fit .surface-ghost-shape {
+  fill: rgba(61, 47, 36, 0.08);
+  stroke: #9a6a52;
+}
+.surface-ghost .surface-ghost-strike { display: none; }
+.surface-ghost.no-fit .surface-ghost-strike {
+  display: block;
+  stroke: #9a6a52;
+  stroke-width: 0.028;
+  stroke-linecap: round;
 }
 
 .zone-label {
@@ -118,6 +152,26 @@ body {
 }
 .hud-progress .hud-sep { margin: 0 5px; color: var(--ink-soft); font-weight: 400; }
 
+.hud-chips { display: flex; gap: 5px; align-items: center; }
+.chip {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(61, 47, 36, 0.1);
+  transition: background 0.25s ease;
+}
+.chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  opacity: 0.22;
+  transition: opacity 0.25s ease;
+}
+.chip.on { background: rgba(46, 122, 114, 0.18); }
+.chip.on .chip-dot { opacity: 1; }
+
 .hud-actions { display: flex; gap: 8px; }
 
 .btn {
@@ -149,6 +203,35 @@ body {
 .btn-icon.muted .snd-slash { display: block; }
 .btn-icon.muted .snd-waves { display: none; }
 .btn-icon.muted { color: #9a8a74; }
+
+/* ---- tier collection feedback (CC-008) ---- */
+
+.tier-fx { pointer-events: none; }
+.tier-fx-outline {
+  fill: rgba(246, 239, 224, 0.14);
+  stroke: #f6efe0;
+  stroke-width: 0.03;
+  stroke-dasharray: 0.12 0.08;
+  stroke-linejoin: round;
+  animation: tier-glow 1.3s ease-out both;
+}
+.tier-fx-spark {
+  fill: #ffe9b8;
+  opacity: 0;
+  animation: tier-spark 1.15s ease-out infinite;
+}
+
+@keyframes tier-glow {
+  0% { opacity: 0; }
+  22% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes tier-spark {
+  0% { opacity: 0; transform: translateY(0); }
+  30% { opacity: 0.95; }
+  100% { opacity: 0; transform: translateY(-0.4px); }
+}
 
 /* ---- hint ---- */
 

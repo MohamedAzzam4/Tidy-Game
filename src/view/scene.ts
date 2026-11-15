@@ -11,18 +11,32 @@ import { furnitureAssets, furnitureShadowRx, ghostShape } from './assets';
 
 export interface SceneLayers {
   decals: SVGGElement;
+  /** Merged, depth-sorted paint list: furniture nodes + resting items (C-6). */
   props: SVGGElement;
   ghosts: SVGGElement;
   labels: SVGGElement;
-  items: SVGGElement;
+  /** Ephemeral feedback (tier-completion animation, CC-008). */
+  fx: SVGGElement;
+  /** Topmost layer for the currently dragged item. */
   drag: SVGGElement;
+}
+
+export interface PaintEntry {
+  node: SVGGElement;
+  /** Painter's-algorithm key (larger = nearer). */
+  key: number;
 }
 
 export interface Scene {
   svg: SVGSVGElement;
   projector: Projector;
   layers: SceneLayers;
+  /** Static furniture paint entries, pre-sorted; the view merges items into
+   *  this list with support-relative keys on every re-render (C-6). */
+  furniturePaint: PaintEntry[];
   ghostBySlot: Map<string, SVGGElement>;
+  /** Per-surface drag ghosts keyed by surface id (CC-005), incl. 'floor'. */
+  ghostBySurface: Map<string, SVGGElement>;
   labelByCategory: Map<string, SVGGElement>;
 }
 
@@ -172,20 +186,37 @@ export function buildScene(level: LevelDef): Scene {
     decals.appendChild(g);
   }
 
+  const furniturePaint: PaintEntry[] = [];
   const sorted = level.furniture
     .filter((f) => !f.flat)
     .map((f) => ({ f, key: projector.depth(f.anchor.x, f.anchor.y) + (f.sortBias ?? 0) }))
     .sort((a, b) => a.key - b.key);
-  for (const { f } of sorted) {
+  for (const { f, key } of sorted) {
     const builder = furnitureAssets[f.asset];
     if (!builder) continue;
     const p = projector.toScreen(f.anchor.x, f.anchor.y, f.anchor.z);
-    const g = el('g', { class: 'furniture', transform: `translate(${fmt(p.x)} ${fmt(p.y)})`, 'data-furniture': f.id });
-    const shadowRx = furnitureShadowRx[f.asset] ?? 0;
-    if (shadowRx > 0) g.appendChild(contactShadow(shadowRx));
-    g.appendChild(builder());
-    props.appendChild(g);
+    const built = builder();
+    // A builder may split into paint parts (e.g. the bookshelf's near side
+    // panel must paint AFTER books standing on its tiers — C-6): each part
+    // gets its own depth key from its `data-paint-offset` anchor shift.
+    const parts = Array.from(built.querySelectorAll(':scope > [data-paint-part]')) as SVGGElement[];
+    const entries: SVGGElement[] = parts.length ? parts : [built];
+    for (const partNode of entries) {
+      const g = el('g', { class: 'furniture', transform: `translate(${fmt(p.x)} ${fmt(p.y)})`, 'data-furniture': f.id });
+      const shadowRx = furnitureShadowRx[f.asset] ?? 0;
+      if (shadowRx > 0 && partNode === entries[0]) g.appendChild(contactShadow(shadowRx));
+      g.appendChild(partNode);
+      let partKey = key;
+      const off = partNode.getAttribute('data-paint-offset');
+      if (off) {
+        const [dx, dy] = off.split(',').map(Number);
+        partKey = projector.depth(f.anchor.x + dx, f.anchor.y + dy) + (f.sortBias ?? 0);
+      }
+      furniturePaint.push({ node: g, key: partKey });
+    }
   }
+  furniturePaint.sort((a, b) => a.key - b.key);
+  for (const e of furniturePaint) props.appendChild(e.node);
 
   const ghosts = el('g', { class: 'layer-ghosts' });
   const ghostBySlot = new Map<string, SVGGElement>();
@@ -197,6 +228,17 @@ export function buildScene(level: LevelDef): Scene {
       ghosts.appendChild(g);
       ghostBySlot.set(slot.id, g);
     }
+  }
+
+  // one reusable ghost group per registered surface (CC-005): the shape is
+  // redrawn to the dragged item's current-orientation footprint on each move
+  const ghostBySurface = new Map<string, SVGGElement>();
+  for (const s of level.surfaces ?? []) {
+    const g = el('g', { class: 'surface-ghost', 'data-surface-ghost': s.id });
+    g.appendChild(el('path', { class: 'surface-ghost-shape', d: '', fill: 'none', stroke: 'none' }));
+    g.appendChild(el('line', { class: 'surface-ghost-strike', x1: 0, y1: 0, x2: 0, y2: 0, stroke: 'none' }));
+    ghosts.appendChild(g);
+    ghostBySurface.set(s.id, g);
   }
 
   const labels = el('g', { class: 'layer-labels' });
@@ -214,9 +256,9 @@ export function buildScene(level: LevelDef): Scene {
     labelByCategory.set(zone.category, t);
   }
 
-  const items = el('g', { class: 'layer-items' });
+  const fxLayer = el('g', { class: 'layer-fx' });
   const drag = el('g', { class: 'layer-drag' });
-  svg.append(decals, props, ghosts, labels, items, drag);
+  svg.append(decals, props, ghosts, labels, fxLayer, drag);
 
-  return { svg, projector, layers: { decals, props, ghosts, labels, items, drag }, ghostBySlot, labelByCategory };
+  return { svg, projector, layers: { decals, props, ghosts, labels, fx: fxLayer, drag }, furniturePaint, ghostBySlot, ghostBySurface, labelByCategory };
 }

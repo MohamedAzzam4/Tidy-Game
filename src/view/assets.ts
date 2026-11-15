@@ -154,42 +154,48 @@ function miniPlant(scale: number): SVGGElement {
   return g;
 }
 
-function staticBook(y: number, z: number, h: number, t: number, cover: string): SVGGElement {
-  // spine (+x) and cover (+y) carry the color; the top shows cream pages
-  const b = box(-0.1, y - t / 2, z, 0.1, y + t / 2, z + h, { top: P.cream, right: cover, left: shade(cover, 0.88) });
-  b.appendChild(poly([[0.101, y - t / 2 + 0.008, z + h * 0.38], [0.101, y + t / 2 - 0.008, z + h * 0.38], [0.101, y + t / 2 - 0.008, z + h * 0.55], [0.101, y - t / 2 + 0.008, z + h * 0.55]], { fill: P.cream, 'fill-opacity': 0.92, stroke: 'none' }));
-  return b;
-}
-
 function bookshelf(): SVGGElement {
-  const g = el('g');
+  // CC-010 rebuild: 4 interactive tiers (board tops 0.10 / 0.68 / 1.28 / 1.88,
+  // boards 0.05 thick, bottom panel 0.10 as drawn) + decorative slab at 2.42.
+  // The builder splits into two paint parts (C-6): the shell behind the books
+  // and the near side panel + top decor, so standing books paint between them.
+  const back = el('g', { 'data-paint-part': 'back', 'data-paint-offset': '0,-0.8' });
   // back panel (interior shows its +x face)
-  g.appendChild(box(-0.29, -0.8, 0.05, -0.22, 0.8, 2.06, { top: P.walnutDark, right: P.linen, left: P.walnutDark }));
-  // left side panel (farther in y → drawn early)
-  g.appendChild(box(-0.29, -0.8, 0, 0.29, -0.73, 2.2, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.85) }));
-  // bottom panel
-  g.appendChild(box(-0.22, -0.74, 0, 0.29, 0.74, 0.1, { top: P.walnutLight, right: P.walnut, left: P.walnutDark }));
-  // shelves
-  g.appendChild(box(-0.22, -0.74, 0.63, 0.29, 0.74, 0.68, { top: P.walnutLight, right: shade(P.walnut, 0.9), left: P.walnutDark }));
-  g.appendChild(box(-0.22, -0.74, 1.25, 0.29, 0.74, 1.3, { top: P.walnutLight, right: shade(P.walnut, 0.9), left: P.walnutDark }));
-  // non-interactive example books on the slot shelf + a small stack below
-  // (drawn BEFORE the near side panel so they sit inside the cubby)
-  g.appendChild(staticBook(0.36, 0.68, 0.34, 0.05, P.teal));
-  g.appendChild(staticBook(0.425, 0.68, 0.3, 0.055, P.mustard));
-  g.appendChild(staticBook(0.5, 0.68, 0.32, 0.045, P.terracottaDark));
-  g.appendChild(box(-0.09, -0.28, 0.1, 0.09, 0.06, 0.15, { top: P.terracotta, right: shade(P.terracotta, 0.75), left: P.cream }));
-  g.appendChild(box(-0.08, -0.24, 0.15, 0.08, 0.02, 0.2, { top: P.tealDark, right: shade(P.tealDark, 0.75), left: P.cream }));
-  // right side panel (nearer → drawn after the books)
-  g.appendChild(box(-0.29, 0.73, 0, 0.29, 0.8, 2.2, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.85) }));
-  // top slab
-  g.appendChild(box(-0.29, -0.8, 1.95, 0.29, 0.8, 2.2, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.85) }));
+  back.appendChild(box(-0.29, -0.8, 0.05, -0.22, 0.8, 2.37, { top: P.walnutDark, right: P.linen, left: P.walnutDark }));
+  // left side panel (farther in y -> drawn early)
+  back.appendChild(box(-0.29, -0.8, 0, 0.29, -0.73, 2.42, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.85) }));
+  // bottom panel = interactive tier 1 (top z 0.10)
+  const t1 = el('g', { 'data-surface': 'bs-tier-1' });
+  t1.appendChild(box(-0.22, -0.74, 0, 0.29, 0.74, 0.1, { top: P.walnutLight, right: shade(P.walnut, 0.9), left: P.walnutDark }));
+  back.appendChild(t1);
+  // tier boards (0.05 thick): tops 0.68 / 1.28 / 1.88 — interactive tiers 2-4
+  const tier = (id: string, z0: number, z1: number) => {
+    const t = el('g', { 'data-surface': id });
+    t.appendChild(box(-0.22, -0.74, z0, 0.29, 0.74, z1, { top: P.walnutLight, right: shade(P.walnut, 0.9), left: P.walnutDark }));
+    return t;
+  };
+  back.appendChild(tier('bs-tier-2', 0.63, 0.68));
+  back.appendChild(tier('bs-tier-3', 1.23, 1.28));
+  back.appendChild(tier('bs-tier-4', 1.83, 1.88));
+
+  // near side panel + top slab + non-interactive decor — paints AFTER anything
+  // resting on the tiers (its own depth is nearer than every tier position)
+  const front = el('g', { 'data-paint-part': 'front', 'data-paint-offset': '0,0.73' });
+  front.appendChild(box(-0.29, 0.73, 0, 0.29, 0.8, 2.42, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.85) }));
+  // decorative top slab (underside 2.37 pins tier-4 clearance) — not placeable
+  front.appendChild(box(-0.29, -0.8, 2.37, 0.29, 0.8, 2.42, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.85) }));
+  // decoy books move OFF the interactive tiers onto the decorative slab (audit finding)
+  front.appendChild(box(-0.1, -0.34, 2.42, 0.1, -0.02, 2.47, { top: P.terracotta, right: shade(P.terracotta, 0.75), left: P.cream }));
+  front.appendChild(box(-0.09, -0.3, 2.47, 0.09, 0.0, 2.51, { top: P.tealDark, right: shade(P.tealDark, 0.75), left: P.cream }));
   // tiny plant on top
   const plant = miniPlant(0.9);
-  plant.setAttribute('transform', `translate(${fmt(ip(0, -0.5, 2.2)[0])} ${fmt(ip(0, -0.5, 2.2)[1])})`);
-  g.appendChild(plant);
+  plant.setAttribute('transform', `translate(${fmt(ip(0, -0.5, 2.42)[0])} ${fmt(ip(0, -0.5, 2.42)[1])})`);
+  front.appendChild(plant);
+
+  const g = el('g');
+  g.append(back, front);
   return g;
 }
-
 function sofa(): SVGGElement {
   const g = el('g');
   const leg = (x: number, y: number) => box(x, y, 0, x + 0.07, y + 0.07, 0.13, { top: P.walnutLight, right: P.walnutDark, left: P.walnutDeep });
@@ -201,8 +207,10 @@ function sofa(): SVGGElement {
   g.appendChild(box(-0.62, -0.8, 0.13, 0.63, 0.8, 0.42, { top: P.teal, right: shade(P.teal, 0.9), left: shade(P.teal, 0.7) }));
   // backrest
   g.appendChild(box(-0.62, -0.8, 0.42, -0.28, 0.8, 1.12, { top: shade(P.teal, 1.08), right: P.teal, left: shade(P.teal, 0.72) }));
-  // seat slab
-  g.appendChild(box(-0.28, -0.6, 0.42, 0.63, 0.6, 0.55, { top: shade(P.teal, 1.14), right: shade(P.teal, 0.92), left: shade(P.teal, 0.7) }));
+  // seat slab — placeable free surface (CC-005): tagged for hit-testing
+  const seat = el('g', { 'data-surface': 'sofaSeat' });
+  seat.appendChild(box(-0.28, -0.6, 0.42, 0.63, 0.6, 0.55, { top: shade(P.teal, 1.14), right: shade(P.teal, 0.92), left: shade(P.teal, 0.7) }));
+  g.appendChild(seat);
   // left arm (drawn before seat edge details, it is farther in y? no — left arm is at -y, behind) — keep order: arms after seat so their inner faces overlap seat edges cleanly
   g.appendChild(box(-0.28, -0.8, 0.42, 0.63, -0.6, 0.74, { top: shade(P.teal, 1.05), right: P.teal, left: shade(P.teal, 0.7) }));
   g.appendChild(box(-0.28, 0.6, 0.42, 0.63, 0.8, 0.74, { top: shade(P.teal, 1.05), right: P.teal, left: shade(P.teal, 0.7) }));
@@ -242,36 +250,49 @@ function bench(): SVGGElement {
   g.appendChild(leg(-0.22, 0.4));
   g.appendChild(leg(0.15, 0.4));
   g.appendChild(box(-0.24, -0.51, 0.3, 0.24, 0.51, 0.4, { top: P.walnut, right: shade(P.walnut, 0.9), left: P.walnutDeep }));
-  g.appendChild(box(-0.28, -0.55, 0.4, 0.28, 0.55, 0.5, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.82) }));
+  // seat slab — placeable free surface (CC-005): tagged for hit-testing
+  const seat = el('g', { 'data-surface': 'benchSeat' });
+  seat.appendChild(box(-0.28, -0.55, 0.4, 0.28, 0.55, 0.5, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.82) }));
+  g.appendChild(seat);
   return g;
 }
 
 function linenShelf(): SVGGElement {
-  const g = el('g');
+  // Two paint parts (C-6, same mechanism as the bookshelf): boards + decor
+  // behind, near side panel + top slab in front, so towels resting on the
+  // boards paint between them.
+  const back = el('g', { 'data-paint-part': 'back', 'data-paint-offset': '0,-0.3' });
   // back panel
-  g.appendChild(box(-0.55, -0.3, 0, -0.48, 0.3, 1.5, { top: P.walnutDark, right: P.linen, left: P.walnutDark }));
+  back.appendChild(box(-0.55, -0.3, 0, -0.48, 0.3, 1.5, { top: P.walnutDark, right: P.linen, left: P.walnutDark }));
   // left side
-  g.appendChild(box(-0.55, -0.3, 0, 0.55, -0.23, 1.56, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.85) }));
+  back.appendChild(box(-0.55, -0.3, 0, 0.55, -0.23, 1.56, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.85) }));
   // bottom
-  g.appendChild(box(-0.48, -0.23, 0, 0.48, 0.3, 0.08, { top: P.walnutLight, right: shade(P.walnut, 0.9), left: P.walnutDark }));
-  // towel board + upper board
-  g.appendChild(box(-0.48, -0.23, 0.86, 0.48, 0.3, 0.91, { top: P.walnutLight, right: shade(P.walnut, 0.9), left: P.walnutDark }));
-  g.appendChild(box(-0.48, -0.23, 1.28, 0.48, 0.3, 1.33, { top: P.walnutLight, right: shade(P.walnut, 0.9), left: P.walnutDark }));
-  // right side
-  g.appendChild(box(-0.55, 0.23, 0, 0.55, 0.3, 1.56, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.85) }));
-  // top slab
-  g.appendChild(box(-0.55, -0.3, 1.56, 0.55, 0.3, 1.62, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.85) }));
-  // decorative folded linens on the upper board
-  g.appendChild(box(-0.36, -0.12, 1.33, -0.06, 0.16, 1.39, { top: P.cream, right: shade(P.cream, 0.85), left: shade(P.cream, 0.7) }));
-  g.appendChild(box(-0.34, -0.1, 1.39, -0.08, 0.14, 1.44, { top: P.sand, right: shade(P.sand, 0.85), left: shade(P.sand, 0.7) }));
+  back.appendChild(box(-0.48, -0.23, 0, 0.48, 0.3, 0.08, { top: P.walnutLight, right: shade(P.walnut, 0.9), left: P.walnutDark }));
+  // towel board + upper board — both placeable free surfaces (CC-005)
+  const towelBoard = el('g', { 'data-surface': 'linen-lower' });
+  towelBoard.appendChild(box(-0.48, -0.23, 0.86, 0.48, 0.3, 0.91, { top: P.walnutLight, right: shade(P.walnut, 0.9), left: P.walnutDark }));
+  back.appendChild(towelBoard);
+  const upperBoard = el('g', { 'data-surface': 'linen-upper' });
+  upperBoard.appendChild(box(-0.48, -0.23, 1.28, 0.48, 0.3, 1.33, { top: P.walnutLight, right: shade(P.walnut, 0.9), left: P.walnutDark }));
+  // decorative folded linens on the upper board (static decor — C-7 obstacles)
+  upperBoard.appendChild(box(-0.36, -0.12, 1.33, -0.06, 0.16, 1.39, { top: P.cream, right: shade(P.cream, 0.85), left: shade(P.cream, 0.7) }));
+  upperBoard.appendChild(box(-0.34, -0.1, 1.39, -0.08, 0.14, 1.44, { top: P.sand, right: shade(P.sand, 0.85), left: shade(P.sand, 0.7) }));
   // woven basket
   const basket = cylinder(0.26, 0.04, 1.33, 0.12, 0.16, { side: P.mustardDark, top: shade(P.mustardDark, 1.12) });
-  g.appendChild(basket);
-  g.appendChild(line([0.15, 0.04, 1.41], [0.37, 0.04, 1.41], { stroke: shade(P.mustardDark, 0.7), 'stroke-width': 0.015 }));
-  g.appendChild(line([0.15, 0.04, 1.45], [0.37, 0.04, 1.45], { stroke: shade(P.mustardDark, 0.7), 'stroke-width': 0.015 }));
+  upperBoard.appendChild(basket);
+  upperBoard.appendChild(line([0.15, 0.04, 1.41], [0.37, 0.04, 1.41], { stroke: shade(P.mustardDark, 0.7), 'stroke-width': 0.015 }));
+  upperBoard.appendChild(line([0.15, 0.04, 1.45], [0.37, 0.04, 1.45], { stroke: shade(P.mustardDark, 0.7), 'stroke-width': 0.015 }));
+  back.appendChild(upperBoard);
+
+  // near side panel + top slab — paints AFTER items resting on the boards
+  const front = el('g', { 'data-paint-part': 'front', 'data-paint-offset': '0,0.3' });
+  front.appendChild(box(-0.55, 0.23, 0, 0.55, 0.3, 1.56, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.85) }));
+  front.appendChild(box(-0.55, -0.3, 1.56, 0.55, 0.3, 1.62, { top: P.walnutLight, right: P.walnut, left: shade(P.walnut, 0.85) }));
+
+  const g = el('g');
+  g.append(back, front);
   return g;
 }
-
 function artFrame(): SVGGElement {
   const g = el('g');
   g.appendChild(box(-0.3, -0.02, 1.32, 0.3, 0.06, 1.96, { top: P.walnut, right: P.walnutDark, left: shade(P.walnut, 0.8) }));
@@ -314,17 +335,21 @@ function kitchenCounter(): SVGGElement {
     g.appendChild(poly([[x0, 0.345, 0.16], [x1, 0.345, 0.16], [x1, 0.345, 0.76], [x0, 0.345, 0.76]], { fill: shade(P.walnut, 1.08), stroke: P.walnutDeep, 'stroke-width': 0.014 }));
     g.appendChild(circleOnWallY((x0 + x1) / 2, 0.355, 0.66, 0.032, { fill: P.walnutDeep }));
   }
-  // countertop
-  g.appendChild(box(-1.54, -0.36, 0.88, 1.54, 0.38, 0.96, { top: P.cream, right: shade(P.cream, 0.85), left: shade(P.cream, 0.7) }));
+  // countertop — placeable free surface (CC-005): tagged for hit-testing;
+  // the static decor ON it (cutting board, kettle — C-7 obstacles) is tagged too
+  // so pointers over the props still resolve to the counter
+  const top = el('g', { 'data-surface': 'kitchenCounter' });
+  top.appendChild(box(-1.54, -0.36, 0.88, 1.54, 0.38, 0.96, { top: P.cream, right: shade(P.cream, 0.85), left: shade(P.cream, 0.7) }));
   // cutting board
-  g.appendChild(box(-1.3, -0.2, 0.96, -0.66, 0.2, 1.0, { top: shade(P.walnutLight, 1.1), right: P.walnut, left: shade(P.walnut, 0.8) }));
+  top.appendChild(box(-1.3, -0.2, 0.96, -0.66, 0.2, 1.0, { top: shade(P.walnutLight, 1.1), right: P.walnut, left: shade(P.walnut, 0.8) }));
   // little kettle
-  g.appendChild(cylinder(0.95, 0, 0.96, 0.13, 0.18, { side: P.terracotta, top: shade(P.terracotta, 1.1) }));
-  g.appendChild(el('path', {
+  top.appendChild(cylinder(0.95, 0, 0.96, 0.13, 0.18, { side: P.terracotta, top: shade(P.terracotta, 1.1) }));
+  top.appendChild(el('path', {
     d: `M ${sp(ip(1.06, 0, 1.1))} q ${fmt(0.09 * C)} ${fmt(0.09 * S)} ${fmt(0.16 * C)} ${fmt(0.16 * S)}`,
     fill: 'none', stroke: P.terracottaDark, 'stroke-width': 0.03, 'stroke-linecap': 'round',
   }));
-  g.appendChild(isoEllipse(0.95, 0, 1.16, 0.05, { fill: P.terracottaDark }));
+  top.appendChild(isoEllipse(0.95, 0, 1.16, 0.05, { fill: P.terracottaDark }));
+  g.appendChild(top);
   return g;
 }
 
@@ -335,7 +360,10 @@ function stool(): SVGGElement {
   g.appendChild(leg(-0.13, 0.06));
   g.appendChild(leg(0.0, -0.14));
   g.appendChild(isoEllipse(0, 0, 0.2, 0.14, { fill: 'none', stroke: P.walnutDark, 'stroke-width': 0.02 }));
-  g.appendChild(cylinder(0, 0, 0.42, 0.2, 0.07, { side: P.walnut, top: P.walnutLight }));
+  // seat — placeable free surface (CC-005): tagged for hit-testing
+  const seat = el('g', { 'data-surface': 'stoolTop' });
+  seat.appendChild(cylinder(0, 0, 0.42, 0.2, 0.07, { side: P.walnut, top: P.walnutLight }));
+  g.appendChild(seat);
   return g;
 }
 
@@ -394,22 +422,47 @@ function windowLeft(): SVGGElement {
 export type Orientation = 'flat' | 'upright';
 export type ItemAssetBuilder = (variant: number, orientation: Orientation) => SVGGElement;
 
-const BOOK_VARIANTS: { cover: string; h: number; t: number }[] = [
-  { cover: P.teal, h: 0.34, t: 0.05 },
-  { cover: P.terracotta, h: 0.3, t: 0.06 },
-  { cover: P.mustard, h: 0.36, t: 0.045 },
-];
+// CC-012/A2: three collections (red / green / blue), four books each.
+// variant = collectionIndex * 4 + i — deterministic and documented so the
+// level maps items to collections by variant. Cover color is fixed per
+// collection (palette-derived); per-book height/thickness variation is kept.
+// Spine markings (in addition to color): differing cream band count (1/2/3)
+// plus a small title dash per book — visible in both orientations at game scale.
+const COLLECTION_COVERS = [P.terracotta, P.leaf, P.slateBlue]; // red, green, blue
+const BOOK_VARIANTS: { col: number; h: number; t: number; bands: number }[] = (() => {
+  const hs = [0.3, 0.33, 0.36, 0.31];
+  const ts = [0.06, 0.05, 0.045, 0.055];
+  const bands = [1, 2, 3, 2];
+  const out: { col: number; h: number; t: number; bands: number }[] = [];
+  for (let col = 0; col < 3; col++) {
+    for (let i = 0; i < 4; i++) out.push({ col, h: hs[i], t: ts[i], bands: bands[i] });
+  }
+  return out;
+})();
 
 function book(variant: number, orientation: Orientation): SVGGElement {
   const v = BOOK_VARIANTS[variant % BOOK_VARIANTS.length];
+  const cover = COLLECTION_COVERS[v.col];
   const g = el('g');
   if (orientation === 'upright') {
-    const b = box(-0.1, -v.t / 2, 0, 0.1, v.t / 2, v.h, { top: P.cream, right: v.cover, left: shade(v.cover, 0.88) });
-    b.appendChild(poly([[0.101, -v.t / 2 + 0.008, v.h * 0.3], [0.101, v.t / 2 - 0.008, v.h * 0.3], [0.101, v.t / 2 - 0.008, v.h * 0.48], [0.101, -v.t / 2 + 0.008, v.h * 0.48]], { fill: P.cream, 'fill-opacity': 0.92, stroke: 'none' }));
+    const b = box(-0.1, -v.t / 2, 0, 0.1, v.t / 2, v.h, { top: P.cream, right: cover, left: shade(cover, 0.88) });
+    // cream band(s) on the +x spine face + a small title dash (readable markings)
+    const bandH = v.h * 0.14;
+    for (let k = 0; k < v.bands; k++) {
+      const y0 = v.h * (0.24 + k * 0.24);
+      b.appendChild(poly([[0.101, -v.t / 2 + 0.008, y0], [0.101, v.t / 2 - 0.008, y0], [0.101, v.t / 2 - 0.008, y0 + bandH], [0.101, -v.t / 2 + 0.008, y0 + bandH]], { fill: P.cream, 'fill-opacity': 0.92, stroke: 'none' }));
+    }
+    b.appendChild(poly([[0.101, -v.t / 2 + 0.008, v.h * 0.08], [0.101, v.t / 2 - 0.008, v.h * 0.08], [0.101, v.t / 2 - 0.008, v.h * 0.14], [0.101, -v.t / 2 + 0.008, v.h * 0.14]], { fill: P.cream, 'fill-opacity': 0.8, stroke: 'none' }));
     g.appendChild(b);
   } else {
-    const b = box(-0.1, -0.16, 0, 0.1, 0.16, 0.05, { top: v.cover, right: shade(v.cover, 0.72), left: P.cream });
-    b.appendChild(poly([[-0.085, -0.14, 0.0505], [0.085, -0.14, 0.0505], [0.085, 0.14, 0.0505], [-0.085, 0.14, 0.0505]], { fill: 'none', stroke: shade(v.cover, 0.85), 'stroke-width': 0.012 }));
+    const b = box(-0.1, -0.16, 0, 0.1, 0.16, 0.05, { top: cover, right: shade(cover, 0.72), left: P.cream });
+    b.appendChild(poly([[-0.085, -0.14, 0.0505], [0.085, -0.14, 0.0505], [0.085, 0.14, 0.0505], [-0.085, 0.14, 0.0505]], { fill: 'none', stroke: shade(cover, 0.85), 'stroke-width': 0.012 }));
+    // cream band(s) across the top face + title dash, matching the spine markings
+    for (let k = 0; k < v.bands; k++) {
+      const y0 = -0.14 + k * (0.28 / v.bands);
+      b.appendChild(poly([[-0.085, y0, 0.051], [0.085, y0, 0.051], [0.085, y0 + 0.026, 0.051], [-0.085, y0 + 0.026, 0.051]], { fill: P.cream, 'fill-opacity': 0.85, stroke: 'none' }));
+    }
+    b.appendChild(poly([[-0.04, -0.115, 0.051], [0.04, -0.115, 0.051], [0.04, -0.085, 0.051], [-0.04, -0.085, 0.051]], { fill: P.cream, 'fill-opacity': 0.7, stroke: 'none' }));
     g.appendChild(b);
   }
   return g;
@@ -419,6 +472,7 @@ const MUG_VARIANTS: { side: string; top: string }[] = [
   { side: shade(P.cream, 0.94), top: P.cream },
   { side: P.teal, top: shade(P.teal, 1.14) },
   { side: P.terracotta, top: shade(P.terracotta, 1.12) },
+  { side: P.mustard, top: shade(P.mustard, 1.1) },
 ];
 
 function mug(variant: number): SVGGElement {
@@ -441,7 +495,9 @@ function mug(variant: number): SVGGElement {
   return g;
 }
 
-const CUSHION_VARIANTS: { cover: string }[] = [{ cover: P.terracotta }, { cover: P.mustard }];
+const CUSHION_VARIANTS: { cover: string }[] = [
+  { cover: P.terracotta }, { cover: P.mustard }, { cover: P.teal }, { cover: P.leaf },
+];
 
 function cushion(variant: number): SVGGElement {
   const cover = CUSHION_VARIANTS[variant % CUSHION_VARIANTS.length].cover;
@@ -457,6 +513,8 @@ function cushion(variant: number): SVGGElement {
 const SHOE_VARIANTS: { cover: string; sole: string; mirror: boolean; laces: boolean }[] = [
   { cover: P.tealDark, sole: P.cream, mirror: false, laces: true },
   { cover: shade(P.walnut, 1.1), sole: P.walnutDeep, mirror: true, laces: false },
+  { cover: P.terracotta, sole: P.cream, mirror: false, laces: true },
+  { cover: P.leafDark, sole: P.sand, mirror: true, laces: false },
 ];
 
 function shoeProfile(col: { cover: string; sole: string; laces: boolean }): SVGGElement {
@@ -497,6 +555,8 @@ function shoe(variant: number): SVGGElement {
 const TOWEL_VARIANTS: { body: string; stripe: string }[] = [
   { body: P.cream, stripe: P.teal },
   { body: P.terracotta, stripe: P.cream },
+  { body: P.sand, stripe: P.leaf },
+  { body: P.teal, stripe: P.cream },
 ];
 
 function towel(variant: number): SVGGElement {

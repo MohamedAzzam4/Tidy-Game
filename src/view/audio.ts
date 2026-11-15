@@ -1,6 +1,15 @@
 /** Tiny synthesized UI sounds — soft, local, no downloads. All guarded. */
 
-type Sfx = 'pickup' | 'place' | 'return' | 'complete';
+type Sfx = 'pickup' | 'place' | 'return' | 'complete' | 'collection';
+
+/** Read-only log of recent play() calls (length-capped) with their mute state —
+ *  the e2e observability channel (C-14). Entries are appended for EVERY call,
+ *  including muted ones, so tests can assert the mute gate. */
+const sfxLog: Array<{ sfx: Sfx; muted: boolean; at: number }> = [];
+const SFX_LOG_CAP = 20;
+export function sfxLogSnapshot(): Array<{ sfx: Sfx; muted: boolean; at: number }> {
+  return sfxLog.map((e) => ({ ...e }));
+}
 
 let ctx: AudioContext | null = null;
 let muted = false;
@@ -41,6 +50,8 @@ function tone(freq: number, delay: number, dur: number, peak: number, type: Osci
 }
 
 export function play(kind: Sfx): void {
+  sfxLog.push({ sfx: kind, muted, at: Date.now() });
+  if (sfxLog.length > SFX_LOG_CAP) sfxLog.shift();
   if (muted || !ctx) return;
   try {
     switch (kind) {
@@ -53,6 +64,11 @@ export function play(kind: Sfx): void {
         break;
       case 'return':
         tone(294, 0, 0.12, 0.03, 'sine');
+        break;
+      case 'collection':
+        // a warm two-note chime, quieter than the complete arpeggio (CC-008)
+        tone(659.25, 0, 0.3, 0.03, 'sine');
+        tone(987.77, 0.11, 0.42, 0.024, 'sine');
         break;
       case 'complete':
         // a small warm arpeggio

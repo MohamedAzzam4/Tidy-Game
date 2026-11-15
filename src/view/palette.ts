@@ -34,6 +34,8 @@ export const palette = {
   mustardDark: '#b58430',
   leaf: '#5c7f5f',
   leafDark: '#47684b',
+  slateBlue: '#4f7099', // deep cozy blue for the blue book collection (CC-012)
+  slateBlueDark: '#3d5879',
 
   // light & shadow
   ink: '#3d2f24',
