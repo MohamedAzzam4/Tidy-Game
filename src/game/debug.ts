@@ -124,6 +124,17 @@ export function installDebug(game: Phaser.Game): void {
       return s.storageOk;
     },
     exportState: () => getScene()?.world ?? null,
+    sceneInfo: () => {
+      const out: Record<string, { active: boolean; paused: boolean; sleeping: boolean }> = {};
+      for (const sc of game.scene.scenes) {
+        out[sc.scene.key] = {
+          active: sc.scene.isActive(),
+          paused: sc.scene.isPaused(),
+          sleeping: sc.scene.isSleeping(),
+        };
+      }
+      return out;
+    },
     audioRecent: () => getScene() ? audioRecentNames() : [],
     completed: () => getScene()?.completionShown ?? false,
     resize: (w, h) => getScene()?.resizeForTest(w, h),

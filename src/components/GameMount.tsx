@@ -35,6 +35,7 @@ export default function GameMount() {
         scene: [BootScene, GameScene, UIScene, RepairScene],
       });
       gameRef.current = game;
+      (window as unknown as { __phaserGame: unknown }).__phaserGame = game;
 
       // debug + autotest hooks (dev-only, harmless in production)
       const { installDebug } = await import('@/game/debug');
