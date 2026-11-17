@@ -1,0 +1,1362 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#0d0a14" />
+    <title>Potion Cellar — a cozy alchemist sorting game</title>
+    <style>
+      :root {
+        --bg: #0d0a14;
+        --bg2: #1a1326;
+        --panel: rgba(28, 22, 40, 0.85);
+        --panel-border: rgba(255, 220, 160, 0.18);
+        --fg: #f3ead6;
+        --muted: #9a8db0;
+        --gold: #ffd166;
+        --good: #7ee787;
+        --bad: #ff7b7b;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--fg);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased; user-select: none; -webkit-tap-highlight-color: transparent; }
+      #game { position: fixed; inset: 0; display: block; touch-action: none; }
+
+      /* HUD */
+      .hud { position: fixed; top: 12px; left: 12px; right: 12px;
+        display: flex; justify-content: space-between; gap: 10px; pointer-events: none; z-index: 10; }
+      .panel { background: var(--panel); border: 1px solid var(--panel-border);
+        border-radius: 12px; padding: 10px 14px; backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px); box-shadow: 0 6px 24px rgba(0,0,0,0.4); }
+      .stat { display: flex; flex-direction: column; gap: 4px; min-width: 90px; }
+      .stat .label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+      .stat .value { font-size: 18px; font-weight: 600; letter-spacing: 0.02em; }
+      .stat .value.gold { color: var(--gold); }
+      .stat .value.combo { color: #ffb86b; }
+      .left, .right { display: flex; gap: 10px; pointer-events: auto; }
+      .right .panel { cursor: pointer; transition: transform 0.12s ease; }
+      .right .panel:hover { transform: translateY(-1px); }
+
+      .xp-bar { position: relative; height: 6px; width: 120px; background: rgba(255,255,255,0.08);
+        border-radius: 3px; overflow: hidden; margin-top: 2px; }
+      .xp-bar .fill { position: absolute; inset: 0; width: 10%;
+        background: linear-gradient(90deg, #ffd166, #ff9f1c); border-radius: 3px;
+        transition: width 0.4s cubic-bezier(.2,.8,.2,1); }
+
+      /* Overlays */
+      .overlay { position: fixed; inset: 0; background: rgba(8, 5, 14, 0.78);
+        display: flex; align-items: center; justify-content: center; z-index: 50;
+        opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
+      .overlay.show { opacity: 1; pointer-events: auto; }
+      .card { background: linear-gradient(180deg, #1f1830, #15101f);
+        border: 1px solid var(--panel-border); border-radius: 18px;
+        padding: 32px 36px; max-width: 540px; width: calc(100% - 32px);
+        box-shadow: 0 20px 60px rgba(0,0,0,0.6); text-align: center; }
+      .card h1 { font-size: 30px; margin-bottom: 8px; letter-spacing: 0.01em;
+        background: linear-gradient(120deg, #ffd166, #ff7eb6, #7ee787);
+        -webkit-background-clip: text; background-clip: text; color: transparent; }
+      .card h2 { font-size: 22px; margin-bottom: 12px; color: var(--gold); }
+      .card p { color: var(--muted); line-height: 1.55; margin-bottom: 14px; font-size: 14px; }
+      .card .stats-row { display: flex; justify-content: center; gap: 24px; margin: 18px 0; }
+      .card .stats-row .item { text-align: center; }
+      .card .stats-row .item .v { font-size: 24px; font-weight: 700; color: var(--fg); }
+      .card .stats-row .item .l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+      .btn { background: linear-gradient(180deg, #ffd166, #ff9f1c); color: #1a0f08;
+        border: none; padding: 12px 24px; border-radius: 10px; font-weight: 700;
+        font-size: 15px; cursor: pointer; letter-spacing: 0.02em;
+        box-shadow: 0 6px 18px rgba(255, 159, 28, 0.3); transition: transform 0.12s ease; }
+      .btn:hover { transform: translateY(-1px); }
+      .btn:active { transform: translateY(0); }
+      .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--panel-border); box-shadow: none; }
+
+      /* Skill tree */
+      .skills-list { display: grid; grid-template-columns: 1fr; gap: 8px; margin: 14px 0; text-align: left; }
+      .skill-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+        background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 10px; }
+      .skill-row.unlocked { background: rgba(255, 209, 102, 0.1); border-color: rgba(255, 209, 102, 0.3); }
+      .skill-row .lvl { font-size: 11px; color: var(--muted); min-width: 28px; }
+      .skill-row .name { font-weight: 600; font-size: 14px; }
+      .skill-row .desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+      /* Toasts */
+      .toasts { position: fixed; top: 80px; left: 50%; transform: translateX(-50%);
+        display: flex; flex-direction: column; gap: 8px; z-index: 30; pointer-events: none; }
+      .toast { background: var(--panel); border: 1px solid var(--panel-border);
+        border-radius: 10px; padding: 8px 16px; font-size: 13px; color: var(--fg);
+        box-shadow: 0 6px 18px rgba(0,0,0,0.5);
+        animation: toastIn 0.4s cubic-bezier(.2,.8,.2,1), toastOut 0.5s ease 2.4s forwards; }
+      .toast.gold { border-color: rgba(255, 209, 102, 0.5); color: var(--gold); }
+      .toast.good { border-color: rgba(126, 231, 135, 0.4); color: var(--good); }
+      @keyframes toastIn { from { transform: translateY(-12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+      @keyframes toastOut { to { transform: translateY(-12px); opacity: 0; } }
+
+      .hint { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+        color: var(--muted); font-size: 12px; pointer-events: none; z-index: 10;
+        text-align: center; line-height: 1.6; max-width: 720px; white-space: nowrap; }
+      .hint kbd { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 4px; padding: 1px 6px; font-size: 11px; color: var(--fg); margin: 0 1px; }
+      /* When an overlay is open, dim HUD + hint to keep focus on the modal */
+      body:has(.overlay.show) .hud,
+      body:has(.overlay.show) .hint { opacity: 0.25; transition: opacity 0.25s ease; }
+      @media (max-width: 720px) {
+        .stat { min-width: 60px; }
+        .stat .value { font-size: 14px; }
+        .hud { top: 8px; left: 8px; right: 8px; gap: 6px; }
+        .panel { padding: 6px 10px; }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+
+    <!-- HUD -->
+    <div class="hud">
+      <div class="left">
+        <div class="panel stat">
+          <span class="label">Cellar</span>
+          <span class="value" id="hud-level">1</span>
+        </div>
+        <div class="panel stat">
+          <span class="label">Potions left</span>
+          <span class="value" id="hud-remaining">0</span>
+        </div>
+        <div class="panel stat">
+          <span class="label">Combo</span>
+          <span class="value combo" id="hud-combo">×1</span>
+        </div>
+      </div>
+      <div class="right">
+        <div class="panel stat" id="hud-xp-panel">
+          <span class="label">Apothecary · Lv <span id="hud-skill-level">0</span></span>
+          <span class="value gold" id="hud-xp">0 / 100 XP</span>
+          <div class="xp-bar"><div class="fill" id="hud-xp-fill"></div></div>
+        </div>
+        <div class="panel stat" id="hud-skills-btn" title="Open skill tree">
+          <span class="label">Skills</span>
+          <span class="value" style="font-size:20px;line-height:1;">⚗</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="toasts" id="toasts"></div>
+
+    <div class="hint" id="hint">
+      Drag a potion to its matching element rack · <kbd>Shift</kbd>+click multi-select · <kbd>1</kbd>–<kbd>8</kbd> send selected · <kbd>R</kbd> new cellar · <kbd>S</kbd> skills · <kbd>M</kbd> mute
+    </div>
+
+    <!-- Start overlay -->
+    <div class="overlay show" id="overlay-start">
+      <div class="card">
+        <h1>Potion Cellar</h1>
+        <p>A cozy alchemist's cellar, potions scattered across the bench.
+          Sort each glowing vial onto its matching element rack.
+          No timer, no failure — just the soft hum of the cellar and the chime of a bottle finding its home.</p>
+        <button class="btn" id="btn-start">Enter the cellar</button>
+        <div style="margin-top: 14px;">
+          <button class="btn ghost" id="btn-reset-prog" style="font-size:12px; padding:6px 14px;">Reset progression</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Level complete overlay -->
+    <div class="overlay" id="overlay-complete">
+      <div class="card">
+        <h2 id="complete-title">Cellar tidied</h2>
+        <p id="complete-sub">Every potion in its place. The cellar hums contentedly.</p>
+        <div class="stats-row">
+          <div class="item"><div class="v" id="complete-xp">+0</div><div class="l">XP gained</div></div>
+          <div class="item"><div class="v" id="complete-time">0:00</div><div class="l">Time</div></div>
+          <div class="item"><div class="v" id="complete-combo">×1</div><div class="l">Best combo</div></div>
+        </div>
+        <p id="complete-next" style="font-size:12px;">Next cellar preview: <span id="next-preview">—</span></p>
+        <button class="btn" id="btn-next">Tidy the next cellar</button>
+      </div>
+    </div>
+
+    <!-- Skills overlay -->
+    <div class="overlay" id="overlay-skills">
+      <div class="card">
+        <h2>Apothecary Mastery</h2>
+        <p>Skills unlock as your cellar level rises. XP carries across runs.</p>
+        <div class="skills-list" id="skills-list"></div>
+        <button class="btn ghost" id="btn-close-skills">Close</button>
+      </div>
+    </div>
+
+    <script>
+    "use strict";
+    /* ============================================================
+       POTION CELLAR — a cozy alchemist sorting game
+       Single self-contained file. Canvas 2D + Web Audio API.
+       Ponytail: smallest complete change. No deps. No build step.
+       ============================================================ */
+
+    /* ---------- Constants & element definitions ---------- */
+    // 8 elements, each with a color and a symbol drawn via canvas paths.
+    const ELEMENTS = [
+      { id: 0, name: "Fire",    color: "#ff6b3d", glow: "#ffb072" },
+      { id: 1, name: "Water",   color: "#4aa3ff", glow: "#a3d0ff" },
+      { id: 2, name: "Earth",   color: "#8a9a5b", glow: "#c2cf8e" },
+      { id: 3, name: "Air",     color: "#e8f1ff", glow: "#ffffff" },
+      { id: 4, name: "Void",    color: "#9d6bd6", glow: "#c79bff" },
+      { id: 5, name: "Light",   color: "#ffd166", glow: "#fff0b3" },
+      { id: 6, name: "Shadow",  color: "#5a5470", glow: "#9a90b0" },
+      { id: 7, name: "Crystal", color: "#5ee3c6", glow: "#a3f0dc" },
+    ];
+
+    // Draw element symbol centered at (cx,cy), radius r.
+    function drawSymbol(ctx, id, cx, cy, r) {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.lineWidth = Math.max(1.2, r * 0.12);
+      ctx.strokeStyle = "#fff";
+      ctx.fillStyle = "#fff";
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      switch (id) {
+        case 0: // Fire — flame
+          ctx.beginPath();
+          ctx.moveTo(0, r);
+          ctx.bezierCurveTo(-r*0.8, r*0.2, -r*0.5, -r*0.5, 0, -r);
+          ctx.bezierCurveTo(r*0.5, -r*0.5, r*0.8, r*0.2, 0, r);
+          ctx.closePath(); ctx.stroke();
+          break;
+        case 1: // Water — droplet
+          ctx.beginPath();
+          ctx.moveTo(0, -r);
+          ctx.bezierCurveTo(r*0.8, -r*0.2, r*0.8, r*0.8, 0, r);
+          ctx.bezierCurveTo(-r*0.8, r*0.8, -r*0.8, -r*0.2, 0, -r);
+          ctx.closePath(); ctx.stroke();
+          break;
+        case 2: // Earth — rounded square
+          ctx.beginPath();
+          const rr = r * 0.85;
+          ctx.roundRect(-rr, -rr, rr*2, rr*2, rr*0.3);
+          ctx.stroke();
+          break;
+        case 3: // Air — three wind curves
+          for (let i = -1; i <= 1; i++) {
+            ctx.beginPath();
+            ctx.moveTo(-r*0.8, i*r*0.4);
+            ctx.quadraticCurveTo(0, i*r*0.4 - r*0.3, r*0.8, i*r*0.4);
+            ctx.stroke();
+          }
+          break;
+        case 4: // Void — circle with inner dot
+          ctx.beginPath(); ctx.arc(0, 0, r*0.85, 0, Math.PI*2); ctx.stroke();
+          ctx.beginPath(); ctx.arc(0, 0, r*0.25, 0, Math.PI*2); ctx.fill();
+          break;
+        case 5: // Light — 8-pointed star
+          ctx.beginPath();
+          for (let i = 0; i < 8; i++) {
+            const a = (i * Math.PI) / 4;
+            const rr2 = i % 2 === 0 ? r*0.9 : r*0.35;
+            const x = Math.cos(a) * rr2, y = Math.sin(a) * rr2;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          ctx.closePath(); ctx.stroke();
+          break;
+        case 6: // Shadow — crescent
+          ctx.beginPath(); ctx.arc(0, 0, r*0.85, 0, Math.PI*2); ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(r*0.3, 0, r*0.7, Math.PI*0.5, Math.PI*1.5);
+          ctx.stroke();
+          break;
+        case 7: // Crystal — diamond
+          ctx.beginPath();
+          ctx.moveTo(0, -r);
+          ctx.lineTo(r*0.75, 0);
+          ctx.lineTo(0, r);
+          ctx.lineTo(-r*0.75, 0);
+          ctx.closePath(); ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(0, -r); ctx.lineTo(0, r);
+          ctx.moveTo(-r*0.75, 0); ctx.lineTo(r*0.75, 0);
+          ctx.stroke();
+          break;
+      }
+      ctx.restore();
+    }
+
+    /* ---------- Math utils ---------- */
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const rand = (min, max) => min + Math.random() * (max - min);
+    const randInt = (min, max) => Math.floor(rand(min, max + 1));
+    const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+    const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
+
+    // Seeded RNG (mulberry32) — shareable seeds.
+    function mulberry32(seed) {
+      let a = seed >>> 0;
+      return function() {
+        a |= 0; a = (a + 0x6D2B79F5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    function formatTime(ms) {
+      const s = Math.floor(ms / 1000);
+      const m = Math.floor(s / 60);
+      return `${m}:${String(s % 60).padStart(2, "0")}`;
+    }
+
+    /* ---------- Audio engine (Web Audio API, all synthesized) ---------- */
+    class AudioEngine {
+      constructor() {
+        this.ctx = null;
+        this.master = null;
+        this.ambientNodes = [];
+        this.muted = false;
+      }
+      init() {
+        if (this.ctx) return;
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return; // shortcut: silent if Web Audio unavailable
+        this.ctx = new AC();
+        this.master = this.ctx.createGain();
+        this.master.gain.value = 0.6;
+        this.master.connect(this.ctx.destination);
+      }
+      resume() { if (this.ctx && this.ctx.state === "suspended") this.ctx.resume(); }
+      toggleMute() { this.muted = !this.muted; if (this.master) this.master.gain.value = this.muted ? 0 : 0.6; }
+
+      // Generic tone helper.
+      tone({ freq = 440, type = "sine", dur = 0.2, gain = 0.2, attack = 0.005, decay = 0.2, detune = 0, when = 0 }) {
+        if (!this.ctx) return;
+        const t0 = this.ctx.currentTime + when;
+        const osc = this.ctx.createOscillator();
+        const g = this.ctx.createGain();
+        osc.type = type; osc.frequency.value = freq;
+        if (detune) osc.detune.value = detune;
+        g.gain.setValueAtTime(0, t0);
+        g.gain.linearRampToValueAtTime(gain, t0 + attack);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + attack + decay);
+        osc.connect(g); g.connect(this.master);
+        osc.start(t0); osc.stop(t0 + attack + decay + 0.02);
+      }
+
+      pickup() {
+        this.tone({ freq: 520, type: "triangle", dur: 0.12, gain: 0.18, attack: 0.004, decay: 0.1 });
+        this.tone({ freq: 780, type: "sine", dur: 0.08, gain: 0.08, attack: 0.004, decay: 0.07, when: 0.02 });
+      }
+      hover() {
+        this.tone({ freq: 900, type: "sine", dur: 0.04, gain: 0.04, attack: 0.002, decay: 0.04 });
+      }
+      // Drop success — triad arpeggio ascending (variable reward: combo steps add scale degrees).
+      dropSuccess(combo) {
+        const base = 392; // G4
+        const scale = [0, 4, 7, 12, 16, 19, 24, 28]; // semitones from base
+        const steps = Math.min(2 + Math.floor(combo / 2), scale.length);
+        for (let i = 0; i < steps; i++) {
+          const semis = scale[i];
+          const f = base * Math.pow(2, semis / 12);
+          this.tone({ freq: f, type: "sine", dur: 0.18, gain: 0.16, attack: 0.003, decay: 0.16, when: i * 0.04 });
+          this.tone({ freq: f * 2, type: "triangle", dur: 0.12, gain: 0.06, attack: 0.003, decay: 0.1, when: i * 0.04 });
+        }
+        // sparkle on top
+        this.tone({ freq: 2200, type: "sine", dur: 0.18, gain: 0.05, attack: 0.002, decay: 0.16, when: steps * 0.04 });
+      }
+      dropWrong() {
+        this.tone({ freq: 150, type: "square", dur: 0.14, gain: 0.1, attack: 0.004, decay: 0.12 });
+        this.tone({ freq: 110, type: "sawtooth", dur: 0.16, gain: 0.06, attack: 0.004, decay: 0.14, when: 0.02 });
+      }
+      levelUp() {
+        // Triumphant I-IV-V-I in C
+        const roots = [261.63, 349.23, 392.0, 523.25];
+        roots.forEach((r, i) => {
+          this.tone({ freq: r, type: "triangle", dur: 0.5, gain: 0.14, attack: 0.01, decay: 0.45, when: i * 0.12 });
+          this.tone({ freq: r * 1.25, type: "sine", dur: 0.4, gain: 0.08, attack: 0.01, decay: 0.36, when: i * 0.12 });
+          this.tone({ freq: r * 1.5, type: "sine", dur: 0.4, gain: 0.07, attack: 0.01, decay: 0.36, when: i * 0.12 });
+        });
+      }
+      levelComplete() {
+        // Full fanfare: ascending arpeggio then chord
+        const notes = [392, 494, 587, 784]; // G-B-D-G
+        notes.forEach((f, i) => {
+          this.tone({ freq: f, type: "triangle", dur: 0.3, gain: 0.14, attack: 0.005, decay: 0.25, when: i * 0.08 });
+        });
+        // final chord
+        [392, 494, 587, 784].forEach(f => {
+          this.tone({ freq: f, type: "sine", dur: 1.2, gain: 0.1, attack: 0.02, decay: 1.1, when: 0.4 });
+        });
+        // sparkle wash
+        for (let i = 0; i < 6; i++) {
+          this.tone({ freq: 1600 + i * 200, type: "sine", dur: 0.5, gain: 0.03, attack: 0.01, decay: 0.45, when: 0.5 + i * 0.05 });
+        }
+      }
+      ambientStart() {
+        if (!this.ctx || this.ambientNodes.length) return;
+        // Low drone
+        const drone = this.ctx.createOscillator();
+        const droneGain = this.ctx.createGain();
+        drone.type = "sine"; drone.frequency.value = 80;
+        droneGain.gain.value = 0.04;
+        drone.connect(droneGain); droneGain.connect(this.master);
+        drone.start();
+        // Filtered noise (wind)
+        const bufferSize = 2 * this.ctx.sampleRate;
+        const noiseBuf = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+        const data = noiseBuf.getChannelData(0);
+        let lastOut = 0;
+        for (let i = 0; i < bufferSize; i++) { // brown noise
+          const white = Math.random() * 2 - 1;
+          lastOut = (lastOut + 0.02 * white) / 1.02;
+          data[i] = lastOut * 3.5;
+        }
+        const noise = this.ctx.createBufferSource();
+        noise.buffer = noiseBuf; noise.loop = true;
+        const filter = this.ctx.createBiquadFilter();
+        filter.type = "lowpass"; filter.frequency.value = 220;
+        const noiseGain = this.ctx.createGain();
+        noiseGain.gain.value = 0.05;
+        noise.connect(filter); filter.connect(noiseGain); noiseGain.connect(this.master);
+        noise.start();
+        this.ambientNodes = [drone, noise, droneGain, noiseGain, filter];
+      }
+      ambientStop() {
+        this.ambientNodes.forEach(n => { try { n.stop && n.stop(); n.disconnect && n.disconnect(); } catch(e){} });
+        this.ambientNodes = [];
+      }
+    }
+
+    /* ---------- Particles ---------- */
+    const particles = [];
+    function spawnBurst(x, y, color, count = 14, opts = {}) {
+      for (let i = 0; i < count; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const s = rand(opts.speedMin || 60, opts.speedMax || 240);
+        particles.push({
+          x, y,
+          vx: Math.cos(a) * s, vy: Math.sin(a) * s - (opts.upBias || 40),
+          life: 1, decay: rand(0.6, 1.4),
+          color, size: rand(1.5, 3.5),
+          gravity: opts.gravity ?? 200,
+        });
+      }
+    }
+    function updateParticles(dt) {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.life -= p.decay * dt;
+        if (p.life <= 0) { particles.splice(i, 1); continue; }
+        p.x += p.vx * dt; p.y += p.vy * dt;
+        p.vy += p.gravity * dt;
+        p.vx *= 0.98;
+      }
+    }
+    function renderParticles(ctx) {
+      for (const p of particles) {
+        ctx.globalAlpha = clamp(p.life, 0, 1);
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    /* ---------- Skill tree ---------- */
+    // Each skill unlocks at a player level. Effects are flags read by game logic.
+    const SKILLS = [
+      { lvl: 1, id: "steadyHand",   name: "Steady Hand",        desc: "Potions ease into place 30% faster." },
+      { lvl: 2, id: "eagleEye",     name: "Eagle Eye",          desc: "Hovering a potion softly highlights its matching rack." },
+      { lvl: 3, id: "multiGrasp",   name: "Multi-Grasp",        desc: "Shift+click selects multiple potions at once." },
+      { lvl: 5, id: "magnetism",    name: "Magnetism",          desc: "Potions auto-snap when dropped near the correct rack." },
+      { lvl: 7, id: "resonance",    name: "Resonance",          desc: "Dragging near the right rack makes it glow; wrong racks stay dim." },
+      { lvl: 10, id: "goldenTouch", name: "Golden Touch",       desc: "Golden potions appear twice as often (5% → 10%)." },
+    ];
+    function unlockedSkills(level) {
+      return new Set(SKILLS.filter(s => level >= s.lvl).map(s => s.id));
+    }
+
+    /* ---------- XP / level curve ---------- */
+    function xpForSkillLevel(skillLevel) {
+      // Cumulative XP required to reach a given apothecary level.
+      // L0=0, L1=100, L2=250, L3=500, L4=900, L5=1500, L6=2300, L7=3300, L8=4500, L9=6000, L10=8000
+      const table = [0, 100, 250, 500, 900, 1500, 2300, 3300, 4500, 6000, 8000];
+      return table[Math.min(skillLevel, table.length - 1)];
+    }
+    function skillLevelFromXp(xp) {
+      let lvl = 0;
+      for (let i = 1; i <= 10; i++) {
+        if (xp >= xpForSkillLevel(i)) lvl = i; else break;
+      }
+      return lvl;
+    }
+
+    /* ---------- Persistence ---------- */
+    const SAVE_KEY = "potion-cellar-save-v1";
+    function loadSave() {
+      try {
+        const raw = localStorage.getItem(SAVE_KEY);
+        if (!raw) return { xp: 0, bestLevel: 0, totalSorted: 0 };
+        const data = JSON.parse(raw);
+        if (typeof data.xp !== "number" || typeof data.bestLevel !== "number" || typeof data.totalSorted !== "number") {
+          return { xp: 0, bestLevel: 0, totalSorted: 0 };
+        }
+        return data;
+      } catch (e) { return { xp: 0, bestLevel: 0, totalSorted: 0 }; }
+    }
+    function writeSave(data) {
+      try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch (e) { /* shortcut: silent in private mode */ }
+    }
+
+    /* ---------- Game state ---------- */
+    const state = {
+      canvas: null, ctx: null, dpr: 1, W: 0, H: 0,
+      audio: new AudioEngine(),
+      potions: [], racks: [],
+      selected: new Set(), // potion ids
+      dragging: null, // { ids: [], ox, oy, startX, startY }
+      hoverPotion: null, hoverRack: null,
+      mouse: { x: 0, y: 0, down: false, shift: false },
+      level: 1,
+      seed: 0,
+      combo: 0,
+      bestCombo: 0,
+      xp: 0,
+      skillLevel: 0,
+      skills: new Set(),
+      startTime: 0,
+      levelXpGained: 0,
+      goldenCount: 0,
+      lastTime: 0,
+      celebrating: false,
+      celebrateT: 0,
+      nextPreview: "",
+      saveData: loadSave(),
+    };
+
+    /* ---------- Level generation ---------- */
+    // Difficulty scales with level. Ponytail: simple closed-form, validated.
+    function levelParams(levelNum) {
+      const potionCount = clamp(8 + Math.floor(levelNum * 1.4), 8, 28);
+      const elementCount = clamp(3 + Math.floor(levelNum / 2), 3, 8);
+      return { potionCount, elementCount };
+    }
+
+    function generateLevel(levelNum, seed) {
+      const rng = mulberry32(seed);
+      const { potionCount, elementCount } = levelParams(levelNum);
+      console.assert(potionCount >= 1 && elementCount >= 1 && elementCount <= ELEMENTS.length,
+        "level params in range", { potionCount, elementCount });
+
+      // Pick elements for this cellar
+      const elemPool = [...ELEMENTS].sort(() => rng() - 0.5);
+      const elems = elemPool.slice(0, elementCount);
+
+      // Racks along the top of the cellar — evenly spaced.
+      const racks = elems.map((e, i) => ({
+        element: e,
+        x: 0, y: 0, // set on resize
+        w: 90, h: 70,
+        index: i,
+        glow: 0,
+      }));
+
+      // Potions scattered in the bench area below the racks.
+      const potions = [];
+      const goldenChance = state.skills.has("goldenTouch") ? 0.10 : 0.05;
+      for (let i = 0; i < potionCount; i++) {
+        const e = elems[Math.floor(rng() * elems.length)];
+        const isGolden = rng() < goldenChance;
+        potions.push({
+          id: i,
+          element: e,
+          x: 0, y: 0, // set on layout
+          tx: 0, ty: 0, // target (for snap animation)
+          homeX: 0, homeY: 0, // original scatter (for hover bob)
+          placed: false,
+          placedRack: null,
+          golden: isGolden,
+          scale: 1,
+          targetScale: 1,
+          bob: rng() * Math.PI * 2,
+          selected: false,
+          hoverGlow: 0,
+        });
+      }
+
+      return { potions, racks, elems, params: { potionCount, elementCount }, seed };
+    }
+
+    // Layout potions and racks based on viewport. Called on resize and after generation.
+    function layoutLevel() {
+      const W = state.W, H = state.H;
+      // Racks across the top
+      const rackCount = state.racks.length;
+      const rackGap = 18;
+      const rackW = clamp((W - 80 - (rackCount - 1) * rackGap) / rackCount, 70, 130);
+      const rackH = rackW * 0.78;
+      const rackY = 100;
+      const totalW = rackW * rackCount + (rackCount - 1) * rackGap;
+      const startX = (W - totalW) / 2;
+      state.racks.forEach((r, i) => {
+        r.x = startX + i * (rackW + rackGap);
+        r.y = rackY;
+        r.w = rackW; r.h = rackH;
+      });
+
+      // Scatter potions in the lower bench area
+      const top = rackY + rackH + 60;
+      const bottom = H - 80;
+      const left = 60, right = W - 60;
+      const placed = []; // for collision-free scatter
+      for (const p of state.potions) {
+        if (p.placed) continue;
+        let x, y, tries = 0;
+        do {
+          x = rand(left, right);
+          y = rand(top, bottom);
+          tries++;
+        } while (tries < 30 && placed.some(q => dist(q.x, q.y, x, y) < 60));
+        p.x = p.tx = p.homeX = x;
+        p.y = p.ty = p.homeY = y;
+        placed.push({ x, y });
+      }
+    }
+
+    /* ---------- Rendering ---------- */
+    function drawBackground(ctx, W, H, t) {
+      // Cellar gradient
+      const g = ctx.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, "#100a18");
+      g.addColorStop(0.5, "#1a1326");
+      g.addColorStop(1, "#0d0814");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+
+      // Stone-wall texture: faint horizontal mortar lines + subtle block seams
+      ctx.strokeStyle = "rgba(255,255,255,0.018)";
+      ctx.lineWidth = 1;
+      const blockH = 64;
+      for (let y = 0; y < H; y += blockH) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+        // offset vertical seams per row (brick pattern)
+        const offset = (Math.floor(y / blockH) % 2) * 80;
+        for (let x = offset; x < W; x += 160) {
+          ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + blockH); ctx.stroke();
+        }
+      }
+
+      // Warm vignette from above (like candle light)
+      const v = ctx.createRadialGradient(W / 2, 60, 40, W / 2, 60, Math.max(W, H) * 0.7);
+      v.addColorStop(0, "rgba(255, 200, 120, 0.10)");
+      v.addColorStop(1, "rgba(255, 200, 120, 0)");
+      ctx.fillStyle = v;
+      ctx.fillRect(0, 0, W, H);
+
+      // Wooden workbench surface filling the lower half — anchors the play area
+      const benchTop = H * 0.42;
+      const bench = ctx.createLinearGradient(0, benchTop, 0, H);
+      bench.addColorStop(0, "rgba(58, 38, 22, 0.55)");
+      bench.addColorStop(0.15, "rgba(48, 32, 19, 0.75)");
+      bench.addColorStop(1, "rgba(28, 18, 10, 0.95)");
+      ctx.fillStyle = bench;
+      ctx.fillRect(0, benchTop, W, H - benchTop);
+      // Bench top edge highlight
+      ctx.strokeStyle = "rgba(255, 200, 120, 0.12)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(0, benchTop); ctx.lineTo(W, benchTop); ctx.stroke();
+      // Wood plank seams on bench
+      ctx.strokeStyle = "rgba(0,0,0,0.25)";
+      ctx.lineWidth = 1;
+      for (let x = 80; x < W; x += 140) {
+        ctx.beginPath(); ctx.moveTo(x, benchTop); ctx.lineTo(x, H); ctx.stroke();
+      }
+    }
+
+    // Draw the long wooden shelf that physically anchors all racks to the wall.
+    function drawShelf(ctx, racks, t) {
+      if (!racks.length) return;
+      const first = racks[0], last = racks[racks.length - 1];
+      const x0 = first.x - 14;
+      const x1 = last.x + last.w + 14;
+      const y0 = first.y + first.h + 2;
+      const shelfH = 14;
+      // Bracket shadow under shelf
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      ctx.beginPath();
+      ctx.roundRect(x0 + 2, y0 + 4, x1 - x0, shelfH, 4); ctx.fill();
+      // Shelf wood
+      const wood = ctx.createLinearGradient(0, y0, 0, y0 + shelfH);
+      wood.addColorStop(0, "#4a3322");
+      wood.addColorStop(1, "#2a1c12");
+      ctx.fillStyle = wood;
+      ctx.beginPath();
+      ctx.roundRect(x0, y0, x1 - x0, shelfH, 4); ctx.fill();
+      // Top edge highlight
+      ctx.strokeStyle = "rgba(255, 200, 120, 0.18)";
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x0 + 4, y0 + 0.5); ctx.lineTo(x1 - 4, y0 + 0.5); ctx.stroke();
+      // Wall-mount brackets (left + right)
+      ctx.fillStyle = "#1a120a";
+      ctx.beginPath();
+      ctx.moveTo(x0 + 8, y0 + shelfH); ctx.lineTo(x0 + 18, y0 + shelfH); ctx.lineTo(x0 + 14, y0 + shelfH + 18); ctx.lineTo(x0 + 4, y0 + shelfH + 18); ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(x1 - 18, y0 + shelfH); ctx.lineTo(x1 - 8, y0 + shelfH); ctx.lineTo(x1 - 4, y0 + shelfH + 18); ctx.lineTo(x1 - 14, y0 + shelfH + 18); ctx.closePath(); ctx.fill();
+    }
+
+    function drawRack(ctx, r, t, isHovered, isTarget) {
+      const x = r.x, y = r.y, w = r.w, h = r.h;
+      // Rack tile (a wooden cubby with a circular element medallion)
+      const wood = ctx.createLinearGradient(0, y, 0, y + h);
+      wood.addColorStop(0, "#3d2b1f");
+      wood.addColorStop(1, "#251812");
+      ctx.fillStyle = wood;
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, 8);
+      ctx.fill();
+      // Inner shadow inset (cubby depth)
+      ctx.strokeStyle = "rgba(0,0,0,0.45)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(x + 3, y + 3, w - 6, h - 6, 6); ctx.stroke();
+
+      // Wood plank lines
+      ctx.strokeStyle = "rgba(255,255,255,0.06)";
+      ctx.lineWidth = 1;
+      for (let i = 1; i < 3; i++) {
+        ctx.beginPath();
+        ctx.moveTo(x + 8, y + (h * i / 3));
+        ctx.lineTo(x + w - 8, y + (h * i / 3));
+        ctx.stroke();
+      }
+
+      // Highlight border on hover/target
+      const glowAmount = clamp(r.glow + (isTarget ? 0.6 : 0) + (isHovered ? 0.3 : 0), 0, 1);
+      if (glowAmount > 0) {
+        // outer glow halo
+        const halo = ctx.createRadialGradient(x + w/2, y + h/2, 8, x + w/2, y + h/2, w);
+        halo.addColorStop(0, `rgba(255, 220, 160, ${glowAmount * 0.35})`);
+        halo.addColorStop(1, "rgba(255, 220, 160, 0)");
+        ctx.fillStyle = halo;
+        ctx.fillRect(x - w/2, y - h/2, w * 2, h * 2);
+        // border ring
+        ctx.strokeStyle = `rgba(255, 220, 160, ${glowAmount * 0.85})`;
+        ctx.lineWidth = 2 + glowAmount * 2;
+        ctx.beginPath();
+        ctx.roundRect(x - 2, y - 2, w + 4, h + 4, 10);
+        ctx.stroke();
+      }
+
+      // Element label background
+      const el = r.element;
+      const labelY = y + h * 0.5;
+      ctx.fillStyle = `${el.color}22`;
+      ctx.beginPath();
+      ctx.arc(x + w * 0.5, labelY, h * 0.32, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = `${el.color}cc`;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(x + w * 0.5, labelY, h * 0.32, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Symbol
+      drawSymbol(ctx, el.id, x + w * 0.5, labelY, h * 0.22);
+
+      // Element name
+      ctx.fillStyle = "rgba(255,255,255,0.55)";
+      ctx.font = "600 10px ui-sans-serif, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillText(el.name.toUpperCase(), x + w * 0.5, y + h - 14);
+
+      // Placed potions stacked on rack
+      const placedHere = state.potions.filter(p => p.placed && p.placedRack === r.index);
+      placedHere.forEach((p, i) => {
+        const px = x + 18 + (i % 4) * 18;
+        const py = y + 8 + Math.floor(i / 4) * 6;
+        drawPotionMini(ctx, px, py, p);
+      });
+    }
+
+    function drawPotionMini(ctx, x, y, p) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(0.35, 0.35);
+      drawPotionShape(ctx, p, false);
+      ctx.restore();
+    }
+
+    // Draw a potion centered at origin. size ~ 30px tall.
+    function drawPotionShape(ctx, p, withGlow) {
+      const e = p.element;
+      const sz = 30 * p.scale;
+      // Glow halo
+      if (withGlow && (p.hoverGlow > 0 || p.golden)) {
+        const glowColor = p.golden ? "#ffd166" : e.glow;
+        const g = ctx.createRadialGradient(0, 0, 2, 0, 0, sz * 1.4);
+        g.addColorStop(0, `${glowColor}aa`);
+        g.addColorStop(1, `${glowColor}00`);
+        ctx.fillStyle = g;
+        ctx.globalAlpha = clamp(p.hoverGlow + (p.golden ? 0.4 : 0), 0, 1);
+        ctx.beginPath();
+        ctx.arc(0, 0, sz * 1.4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      // Bottle body (rounded flask)
+      const bodyW = sz * 0.7;
+      const bodyH = sz * 0.8;
+      const neckW = sz * 0.22;
+      const neckH = sz * 0.35;
+      // Liquid color
+      const liquid = ctx.createLinearGradient(0, -bodyH/2, 0, bodyH/2);
+      liquid.addColorStop(0, e.glow);
+      liquid.addColorStop(1, e.color);
+      // Glass outline
+      ctx.strokeStyle = p.golden ? "#ffd166" : "rgba(255,255,255,0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.fillStyle = liquid;
+      ctx.beginPath();
+      // neck
+      ctx.moveTo(-neckW/2, -bodyH/2 - neckH);
+      ctx.lineTo(-neckW/2, -bodyH/2);
+      // body curve (left)
+      ctx.bezierCurveTo(-bodyW/2, -bodyH/2 + 4, -bodyW/2, bodyH/2 - 4, -neckW/2, bodyH/2);
+      // bottom
+      ctx.lineTo(neckW/2, bodyH/2);
+      // body curve (right)
+      ctx.bezierCurveTo(bodyW/2, bodyH/2 - 4, bodyW/2, -bodyH/2 + 4, neckW/2, -bodyH/2);
+      // neck right
+      ctx.lineTo(neckW/2, -bodyH/2 - neckH);
+      // cork
+      ctx.lineTo(neckW/2 + 2, -bodyH/2 - neckH - 4);
+      ctx.lineTo(-neckW/2 - 2, -bodyH/2 - neckH - 4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // Cork top
+      ctx.fillStyle = "#8a5a3a";
+      ctx.fillRect(-neckW/2 - 2, -bodyH/2 - neckH - 6, neckW + 4, 4);
+
+      // Liquid highlight (glossy)
+      ctx.fillStyle = "rgba(255,255,255,0.25)";
+      ctx.beginPath();
+      ctx.ellipse(-bodyW * 0.22, bodyH * 0.05, bodyW * 0.12, bodyH * 0.35, -0.4, 0, Math.PI*2);
+      ctx.fill();
+
+      // Element symbol on body
+      drawSymbol(ctx, e.id, 0, bodyH * 0.05, bodyW * 0.22);
+
+      // Golden shimmer
+      if (p.golden) {
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.6)";
+        ctx.lineWidth = 1;
+        for (let i = 0; i < 3; i++) {
+          const a = (Date.now() * 0.002 + i * 2) % (Math.PI * 2);
+          ctx.beginPath();
+          ctx.arc(Math.cos(a) * bodyW * 0.4, Math.sin(a) * bodyH * 0.4, 1.5, 0, Math.PI*2);
+          ctx.stroke();
+        }
+      }
+    }
+
+    function drawPotion(ctx, p, t) {
+      ctx.save();
+      // bob for unplaced potions
+      const bobY = p.placed ? 0 : Math.sin(t * 0.002 + p.bob) * 2;
+      ctx.translate(p.x, p.y + bobY);
+      // selected indicator
+      if (p.selected) {
+        ctx.strokeStyle = "rgba(255, 209, 102, 0.9)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(0, 0, 28, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      drawPotionShape(ctx, p, true);
+      ctx.restore();
+    }
+
+    /* ---------- HUD ---------- */
+    function updateHUD() {
+      const remaining = state.potions.filter(p => !p.placed).length;
+      document.getElementById("hud-level").textContent = state.level;
+      document.getElementById("hud-remaining").textContent = remaining;
+      const comboMul = 1 + Math.min(state.combo, 20) * 0.1;
+      document.getElementById("hud-combo").textContent = `×${comboMul.toFixed(1)}`;
+      document.getElementById("hud-skill-level").textContent = state.skillLevel;
+      const cur = xpForSkillLevel(state.skillLevel);
+      const next = xpForSkillLevel(state.skillLevel + 1);
+      const pct = state.skillLevel >= 10 ? 100 : clamp(((state.xp - cur) / (next - cur)) * 100, 0, 100);
+      // Endowed progress: bar shows current progress, but visually starts with a tiny minimum width
+      document.getElementById("hud-xp-fill").style.width = `${Math.max(4, pct)}%`;
+      document.getElementById("hud-xp").textContent =
+        state.skillLevel >= 10 ? "MAX" : `${state.xp} / ${next} XP`;
+    }
+
+    function toast(msg, kind = "") {
+      const el = document.createElement("div");
+      el.className = `toast ${kind}`;
+      el.textContent = msg;
+      document.getElementById("toasts").appendChild(el);
+      setTimeout(() => el.remove(), 3000);
+    }
+
+    /* ---------- Input ---------- */
+    function getMouse(e) {
+      const rect = state.canvas.getBoundingClientRect();
+      const t = e.touches ? e.touches[0] : e;
+      return { x: t.clientX - rect.left, y: t.clientY - rect.top };
+    }
+
+    function findPotionAt(x, y) {
+      // topmost first
+      for (let i = state.potions.length - 1; i >= 0; i--) {
+        const p = state.potions[i];
+        if (p.placed) continue;
+        if (dist(p.x, p.y, x, y) < 26) return p;
+      }
+      return null;
+    }
+    function findRackAt(x, y) {
+      for (const r of state.racks) {
+        if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return r;
+      }
+      return null;
+    }
+
+    function onPointerDown(e) {
+      state.audio.resume();
+      const m = getMouse(e);
+      state.mouse.x = m.x; state.mouse.y = m.y; state.mouse.down = true;
+      state.mouse.shift = e.shiftKey;
+      const p = findPotionAt(m.x, m.y);
+      if (p) {
+        if (state.mouse.shift && state.skills.has("multiGrasp")) {
+          // toggle in selection
+          if (state.selected.has(p.id)) state.selected.delete(p.id);
+          else state.selected.add(p.id);
+          p.selected = state.selected.has(p.id);
+        } else {
+          // single select + drag
+          if (!state.selected.size) state.selected.add(p.id);
+          else if (!state.selected.has(p.id)) {
+            // switch to single
+            state.selected.forEach(id => { const q = state.potions.find(pp => pp.id === id); if (q) q.selected = false; });
+            state.selected.clear();
+            state.selected.add(p.id);
+          }
+          state.dragging = { ids: [...state.selected], startX: m.x, startY: m.y, off: state.potions.find(pp => pp.id === p.id) };
+        }
+        state.potions.forEach(pp => pp.selected = state.selected.has(pp.id));
+        state.audio.pickup();
+      } else {
+        // click empty space: clear selection
+        if (state.selected.size) {
+          state.selected.forEach(id => { const q = state.potions.find(pp => pp.id === id); if (q) q.selected = false; });
+          state.selected.clear();
+        }
+      }
+      e.preventDefault();
+    }
+
+    function onPointerMove(e) {
+      const m = getMouse(e);
+      state.mouse.x = m.x; state.mouse.y = m.y;
+      state.mouse.shift = e.shiftKey;
+      if (state.dragging) {
+        const dx = m.x - state.dragging.startX;
+        const dy = m.y - state.dragging.startY;
+        for (const id of state.dragging.ids) {
+          const p = state.potions.find(pp => pp.id === id);
+          if (!p || p.placed) continue;
+          const ox = state.dragging.off.x;
+          const oy = state.dragging.off.y;
+          p.x = ox + dx; p.y = oy + dy;
+          p.tx = p.x; p.ty = p.y;
+        }
+      } else {
+        // hover detection
+        const p = findPotionAt(m.x, m.y);
+        if (p !== state.hoverPotion) {
+          if (state.hoverPotion) state.hoverPotion.hoverGlow = 0;
+          state.hoverPotion = p;
+          if (p) state.audio.hover();
+        }
+        state.hoverRack = findRackAt(m.x, m.y);
+      }
+    }
+
+    function onPointerUp(e) {
+      state.mouse.down = false;
+      if (!state.dragging) return;
+      const m = getMouse(e);
+      // Determine drop target rack based on pointer position
+      const r = findRackAt(m.x, m.y);
+      let placedAny = false;
+      let placedRight = 0;
+      let placedWrong = 0;
+      const ids = state.dragging.ids;
+      const dragOff = state.dragging.off;
+      // Magnetism: snap to nearest rack if close
+      let targetRack = r;
+      if (!targetRack && state.skills.has("magnetism")) {
+        let best = null, bestD = 80;
+        for (const rk of state.racks) {
+          const cx = rk.x + rk.w / 2, cy = rk.y + rk.h / 2;
+          const d = dist(m.x, m.y, cx, cy);
+          if (d < bestD) { bestD = d; best = rk; }
+        }
+        targetRack = best;
+      }
+      for (const id of ids) {
+        const p = state.potions.find(pp => pp.id === id);
+        if (!p || p.placed) continue;
+        if (targetRack) {
+          if (targetRack.element.id === p.element.id) {
+            // correct
+            p.placed = true;
+            p.placedRack = targetRack.index;
+            state.combo++;
+            state.bestCombo = Math.max(state.bestCombo, state.combo);
+            const mul = 1 + Math.min(state.combo, 20) * 0.1;
+            const baseXp = p.golden ? 50 : 10;
+            const gained = Math.round(baseXp * mul);
+            state.xp += gained;
+            state.levelXpGained += gained;
+            state.saveData.totalSorted++;
+            spawnBurst(p.x, p.y, p.element.glow, p.golden ? 22 : 14, { speedMax: 280 });
+            if (p.golden) { state.goldenCount++; toast(`Golden potion! +${gained} XP`, "gold"); }
+            placedRight++;
+            placedAny = true;
+          } else {
+            // wrong — soft fail, combo breaks but no XP loss
+            state.combo = 0;
+            state.audio.dropWrong();
+            spawnBurst(p.x, p.y, "#ff7b7b", 8, { speedMax: 140 });
+            // shake back to home
+            p.tx = p.homeX; p.ty = p.homeY;
+            placedWrong++;
+          }
+        } else {
+          // dropped on bench — return home
+          p.tx = p.homeX; p.ty = p.homeY;
+        }
+      }
+      if (placedRight > 0) {
+        state.audio.dropSuccess(state.combo);
+        // re-check level progression
+        recomputeSkillLevel();
+      }
+      state.dragging = null;
+      state.selected.clear();
+      state.potions.forEach(pp => pp.selected = false);
+      updateHUD();
+      checkLevelComplete();
+    }
+
+    function onKeyDown(e) {
+      const k = e.key.toLowerCase();
+      if (k === "r") { startLevel(state.level, Date.now()); return; }
+      if (k === "s") { openSkills(); return; }
+      if (k === "m") { state.audio.toggleMute(); toast(state.audio.muted ? "Muted" : "Sound on"); return; }
+      if (k === "escape") { closeSkills(); return; }
+      // number keys 1-8 send selected to rack N (JavaJack hand-cramp fix)
+      const n = parseInt(k, 10);
+      if (!isNaN(n) && n >= 1 && n <= 8 && state.selected.size > 0) {
+        const rack = state.racks[n - 1];
+        if (!rack) return;
+        // simulate drop
+        const ids = [...state.selected];
+        let placedRight = 0, placedWrong = 0;
+        for (const id of ids) {
+          const p = state.potions.find(pp => pp.id === id);
+          if (!p || p.placed) continue;
+          if (rack.element.id === p.element.id) {
+            p.placed = true; p.placedRack = rack.index;
+            state.combo++; state.bestCombo = Math.max(state.bestCombo, state.combo);
+            const mul = 1 + Math.min(state.combo, 20) * 0.1;
+            const baseXp = p.golden ? 50 : 10;
+            const gained = Math.round(baseXp * mul);
+            state.xp += gained; state.levelXpGained += gained;
+            state.saveData.totalSorted++;
+            spawnBurst(rack.x + rack.w/2, rack.y + rack.h/2, p.element.glow, p.golden ? 22 : 14);
+            placedRight++;
+          } else {
+            state.combo = 0;
+            state.audio.dropWrong();
+            spawnBurst(p.x, p.y, "#ff7b7b", 6);
+            p.tx = p.homeX; p.ty = p.homeY;
+            placedWrong++;
+          }
+        }
+        if (placedRight > 0) {
+          state.audio.dropSuccess(state.combo);
+          recomputeSkillLevel();
+        }
+        state.selected.clear();
+        state.potions.forEach(pp => pp.selected = false);
+        updateHUD();
+        checkLevelComplete();
+        e.preventDefault();
+      }
+    }
+
+    /* ---------- Game flow ---------- */
+    function recomputeSkillLevel() {
+      const newLvl = skillLevelFromXp(state.xp);
+      if (newLvl > state.skillLevel) {
+        const oldLvl = state.skillLevel;
+        state.skillLevel = newLvl;
+        state.skills = unlockedSkills(newLvl);
+        const unlocked = SKILLS.find(s => s.lvl === newLvl);
+        state.audio.levelUp();
+        toast(`Apothecary Level ${newLvl}!${unlocked ? " " + unlocked.name + " unlocked." : ""}`, "gold");
+        spawnBurst(state.W / 2, state.H / 2, "#ffd166", 40, { speedMax: 360, upBias: 100 });
+        state.saveData.bestLevel = Math.max(state.saveData.bestLevel, newLvl);
+      }
+      writeSave({ ...state.saveData, xp: state.xp });
+    }
+
+    function startLevel(levelNum, seed) {
+      state.level = levelNum;
+      state.seed = seed;
+      const gen = generateLevel(levelNum, seed);
+      state.potions = gen.potions;
+      state.racks = gen.racks;
+      state.selected.clear();
+      state.dragging = null;
+      state.hoverPotion = null;
+      state.hoverRack = null;
+      state.combo = 0;
+      state.bestCombo = 0;
+      state.levelXpGained = 0;
+      state.goldenCount = 0;
+      state.startTime = performance.now();
+      state.celebrating = false;
+      // preview next
+      const nextP = levelParams(levelNum + 1);
+      const nextE = clamp(nextP.elementCount, 3, 8);
+      state.nextPreview = `${nextP.potionCount} potions · ${nextE} elements`;
+      layoutLevel();
+      updateHUD();
+      hideOverlay("overlay-complete");
+      hideOverlay("overlay-start");
+      hideOverlay("overlay-skills");
+    }
+
+    function checkLevelComplete() {
+      const remaining = state.potions.filter(p => !p.placed).length;
+      if (remaining === 0 && !state.celebrating) {
+        state.celebrating = true;
+        state.celebrateT = performance.now();
+        state.audio.levelComplete();
+        // big burst
+        for (let i = 0; i < 6; i++) {
+          setTimeout(() => {
+            spawnBurst(rand(state.W * 0.2, state.W * 0.8), rand(state.H * 0.3, state.H * 0.7),
+              pick(["#ffd166", "#ff7eb6", "#7ee787", "#5ee3c6", "#a3d0ff"]), 18, { speedMax: 320, upBias: 80 });
+          }, i * 200);
+        }
+        // level bonus XP
+        const elapsed = performance.now() - state.startTime;
+        const speedBonus = elapsed < 60000 ? 50 : 0;
+        const levelBonus = 100 * state.level + speedBonus;
+        state.xp += levelBonus;
+        state.levelXpGained += levelBonus;
+        recomputeSkillLevel();
+        state.saveData.bestLevel = Math.max(state.saveData.bestLevel, state.level);
+        writeSave({ ...state.saveData, xp: state.xp });
+
+        // Show overlay after a beat
+        setTimeout(() => {
+          document.getElementById("complete-xp").textContent = `+${state.levelXpGained}`;
+          document.getElementById("complete-time").textContent = formatTime(elapsed);
+          document.getElementById("complete-combo").textContent = `×${(1 + Math.min(state.bestCombo, 20) * 0.1).toFixed(1)}`;
+          document.getElementById("complete-title").textContent = `Cellar ${state.level} tidied`;
+          document.getElementById("next-preview").textContent = state.nextPreview;
+          showOverlay("overlay-complete");
+        }, 1400);
+      }
+    }
+
+    /* ---------- Overlays ---------- */
+    function showOverlay(id) { document.getElementById(id).classList.add("show"); }
+    function hideOverlay(id) { document.getElementById(id).classList.remove("show"); }
+
+    function openSkills() {
+      const list = document.getElementById("skills-list");
+      list.innerHTML = "";
+      for (const s of SKILLS) {
+        const unlocked = state.skillLevel >= s.lvl;
+        const row = document.createElement("div");
+        row.className = "skill-row" + (unlocked ? " unlocked" : "");
+        row.innerHTML = `<div class="lvl">Lv${s.lvl}</div>
+          <div><div class="name">${s.name}${unlocked ? " ✓" : ""}</div>
+          <div class="desc">${s.desc}</div></div>`;
+        list.appendChild(row);
+      }
+      showOverlay("overlay-skills");
+    }
+    function closeSkills() { hideOverlay("overlay-skills"); }
+
+    /* ---------- Main loop ---------- */
+    function frame(now) {
+      const dt = Math.min(0.05, (now - state.lastTime) / 1000 || 0.016);
+      state.lastTime = now;
+
+      // Ease potions toward target (lerp) — smooth snap-back / magnetism
+      for (const p of state.potions) {
+        if (state.dragging && state.dragging.ids.includes(p.id)) continue;
+        if (!p.placed) {
+          p.x = lerp(p.x, p.tx, 0.18);
+          p.y = lerp(p.y, p.ty, 0.18);
+        }
+        // hover glow
+        const targetGlow = (p === state.hoverPotion || p.selected) ? 1 : 0;
+        p.hoverGlow = lerp(p.hoverGlow, targetGlow, 0.15);
+        // selected pulse scale
+        p.targetScale = p.selected ? 1.08 : 1;
+        p.scale = lerp(p.scale, p.targetScale, 0.18);
+      }
+      // rack glow decay
+      for (const r of state.racks) {
+        r.glow = lerp(r.glow, 0, 0.08);
+      }
+
+      // Eagle Eye / Resonance: highlight matching rack when dragging or hovering a potion
+      if (state.skills.has("eagleEye") || state.skills.has("resonance")) {
+        const focusPotion = state.dragging
+          ? state.potions.find(pp => pp.id === state.dragging.ids[0])
+          : state.hoverPotion;
+        if (focusPotion && !focusPotion.placed) {
+          const rack = state.racks.find(r => r.element.id === focusPotion.element.id);
+          if (rack) rack.glow = state.skills.has("resonance") && state.dragging ? 0.8 : 0.4;
+        }
+      }
+
+      updateParticles(dt);
+
+      // Render
+      const ctx = state.ctx, W = state.W, H = state.H;
+      drawBackground(ctx, W, H, now);
+
+      // Long wooden shelf that mounts the racks to the wall (drawn before racks)
+      drawShelf(ctx, state.racks, now);
+
+      // Racks
+      for (const r of state.racks) {
+        const isHover = (state.hoverRack === r);
+        const dragEl = state.dragging ? state.potions.find(pp => pp.id === state.dragging.ids[0]) : null;
+        const isTarget = dragEl && r.element.id === dragEl.element.id;
+        drawRack(ctx, r, now, isHover, isTarget);
+      }
+
+      // Potions (unplaced first, then dragged on top)
+      for (const p of state.potions) {
+        if (p.placed) continue;
+        if (state.dragging && state.dragging.ids.includes(p.id)) continue;
+        drawPotion(ctx, p, now);
+      }
+      // Dragged potions last (topmost)
+      if (state.dragging) {
+        for (const id of state.dragging.ids) {
+          const p = state.potions.find(pp => pp.id === id);
+          if (p && !p.placed) drawPotion(ctx, p, now);
+        }
+      }
+
+      renderParticles(ctx);
+
+      requestAnimationFrame(frame);
+    }
+
+    /* ---------- Resize ---------- */
+    function resize() {
+      const c = state.canvas;
+      state.dpr = Math.min(window.devicePixelRatio || 1, 2);
+      state.W = window.innerWidth;
+      state.H = window.innerHeight;
+      c.width = Math.floor(state.W * state.dpr);
+      c.height = Math.floor(state.H * state.dpr);
+      c.style.width = state.W + "px";
+      c.style.height = state.H + "px";
+      state.ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+      if (state.potions.length) layoutLevel();
+    }
+
+    /* ---------- Init ---------- */
+    function init() {
+      state.canvas = document.getElementById("game");
+      state.ctx = state.canvas.getContext("2d");
+      // Restore progression
+      state.xp = state.saveData.xp;
+      state.skillLevel = skillLevelFromXp(state.xp);
+      state.skills = unlockedSkills(state.skillLevel);
+
+      resize();
+      window.addEventListener("resize", resize);
+
+      // Pointer events (mouse + touch via pointer)
+      state.canvas.addEventListener("pointerdown", onPointerDown);
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerUp);
+      window.addEventListener("keydown", onKeyDown);
+
+      // Buttons
+      document.getElementById("btn-start").addEventListener("click", () => {
+        state.audio.init();
+        state.audio.resume();
+        state.audio.ambientStart();
+        startLevel(1, Date.now());
+      });
+      document.getElementById("btn-next").addEventListener("click", () => {
+        startLevel(state.level + 1, Date.now() + state.level);
+      });
+      document.getElementById("hud-skills-btn").addEventListener("click", openSkills);
+      document.getElementById("hud-xp-panel").addEventListener("click", openSkills);
+      document.getElementById("btn-close-skills").addEventListener("click", closeSkills);
+      document.getElementById("btn-reset-prog").addEventListener("click", () => {
+        state.saveData = { xp: 0, bestLevel: 0, totalSorted: 0 };
+        writeSave(state.saveData);
+        state.xp = 0; state.skillLevel = 0; state.skills = new Set();
+        updateHUD();
+        toast("Progression reset");
+      });
+
+      updateHUD();
+      state.lastTime = performance.now();
+      requestAnimationFrame(frame);
+    }
+
+    // Self-checks (ponytail): invariants on level gen + XP curve.
+    (function selfCheck() {
+      // XP curve must be strictly increasing
+      let prev = -1;
+      for (let i = 0; i <= 10; i++) {
+        const v = xpForSkillLevel(i);
+        console.assert(v > prev, "xp curve strictly increasing", { i, v, prev });
+        prev = v;
+      }
+      // skillLevelFromXp should round-trip
+      for (let i = 0; i <= 10; i++) {
+        const xp = xpForSkillLevel(i);
+        console.assert(skillLevelFromXp(xp) === i, "skill level round-trip", { i, xp });
+      }
+      // Level params must stay in range across reasonable levels
+      for (let lv = 1; lv <= 50; lv++) {
+        const p = levelParams(lv);
+        console.assert(p.potionCount >= 1 && p.potionCount <= 30, "potion count range", { lv, p });
+        console.assert(p.elementCount >= 1 && p.elementCount <= ELEMENTS.length, "element count range", { lv, p });
+      }
+      // generateLevel must produce exactly potionCount potions and elementCount racks
+      const test = generateLevel(3, 12345);
+      console.assert(test.potions.length === test.params.potionCount, "potion count matches");
+      console.assert(test.racks.length === test.params.elementCount, "rack count matches");
+    })();
+
+    init();
+    </script>
+  </body>
+</html>
