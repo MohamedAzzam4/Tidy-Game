@@ -1,684 +1,620 @@
 /**
- * View + input: renders the scene, converts pointer events into room
- * coordinates, drags items, previews valid placements and animates results.
- * All rules come from the game model — the view never invents its own.
+ * TideView — owns the canvas, camera, input, animation and the event→effect
+ * wiring between the pure model and the audio/visual layers.
  *
- * Target precedence (plan §8.3, C-10): (1) slot match wins; else (2) the
- * nearest [data-surface] element under the pointer; else (3) implicit floor.
- * When a furniture surface is hovered, the pointer maps through that surface's
- * plane (C-2): the floor-projected pointer is shifted by (+topZ, +topZ), the
- * exact inverse of the projector's z offset.
+ * Anti-cramp controls (JavaJack's hand-cramp feedback): generous hit radii,
+ * magnetic snapping, and double-tap auto-flight so the whole game is playable
+ * click-only — dragging is optional, never required.
  */
-import type { DropTarget, ItemDef, LevelDef, SlotDef } from '../game/types';
-import type { ItemLocation } from '../game/model';
-import { TidyingGame, isTierSurface, orientationForPlacement } from '../game/model';
-import { palette as P } from './palette';
-import { itemFootprint } from '../level/footprints';
-import { buildScene, type Scene } from './scene';
-import { itemAssets, itemShadowRx, ip } from './assets';
-import { el, fmt } from './svg';
+import type { RunStats, World } from '../game/types';
+import { TideGame } from '../game/model';
+import type { SkillId } from '../game/skills';
+import { mulberry32 } from '../game/worldgen';
 import * as audio from './audio';
+import { drawScene, newViewAnim, type Camera, type ViewAnim } from './render';
 
-const DROP_RADIUS = 0.95; // forgiving snap radius, world units
-const LIFT = 0.55; // drag lift height, world units
-const DRAG_SCALE = 1.07;
-const SNAP_MS = 170;
-
-type FromLoc = NonNullable<ReturnType<TidyingGame['pickUp']>['from']>; // floor | slot | surface
-
-interface DragState {
-  id: string;
-  pointerId: number;
-  from: FromLoc;
-  offX: number;
-  offY: number;
-  tx: number;
-  ty: number;
-  target: DropTarget | null;
-  node: SVGGElement;
-  art: SVGGElement;
-  shadow: SVGEllipseElement;
-  variant: number;
-  asset: string;
-  raf: number;
+export interface Progress {
+  crittersFiled: number;
+  crittersTotal: number;
+  jarsSealed: number;
+  jarsTotal: number;
+  jarsShelved: number;
+  streak: number;
 }
 
-const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
-const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
+export interface ViewHooks {
+  onXp(total: number, level: number, gained: number): void;
+  onUnlock(skillId: SkillId): void;
+  onLore(line: string): void;
+  onHint(text: string): void;
+  onStreak(n: number): void;
+  onComplete(stats: RunStats): void;
+  onProgress(p: Progress): void;
+}
 
-export function initGameView(root: HTMLElement, level: LevelDef, seed?: number): void {
-  const game = new TidyingGame(level, seed);
-  const scene: Scene = buildScene(level);
-  const { svg, projector: pj, layers } = scene;
+export interface SkillState {
+  cooldownsUntil: Record<string, number>;
+  activeUntil: Record<string, number>;
+}
 
-  const stage = document.createElement('div');
-  stage.className = 'stage';
-  stage.appendChild(svg);
-  stage.insertAdjacentHTML(
-    'beforeend',
-    `
-    <div class="hud">
-      <div class="hud-head">
-        <span class="hud-title">Cozy Corner</span>
-        <span class="hud-sub">move-in day</span>
-      </div>
-      <div class="hud-progress" aria-live="polite"><span id="hudPlaced">0</span><span class="hud-sep">/</span><span id="hudTotal">0</span></div>
-      <div class="hud-chips" id="hudChips" aria-label="Book collections"></div>
-      <div class="hud-actions">
-        <button id="btnMess" class="btn" type="button">New Mess</button>
-        <button id="btnReset" class="btn" type="button">Reset</button>
-        <button id="btnMute" class="btn btn-icon" type="button" aria-pressed="false" aria-label="Toggle sound">
-          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
-            <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"></path>
-            <path class="snd-waves" d="M16.5 8.5a5 5 0 0 1 0 7" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round"></path>
-            <line class="snd-slash" x1="4" y1="4" x2="20" y2="20" stroke="currentColor" stroke-width="2" stroke-linecap="round"></line>
-          </svg>
-        </button>
-      </div>
-    </div>
-    <div class="hint" id="hint">An open box, a fresh start — put things anywhere they fit; gather each book color on one shelf tier.</div>
-    <div class="fx" id="fx" hidden>
-      <div class="fx-glow"></div>
-      <div class="fx-sparks" aria-hidden="true"></div>
-    </div>
-    <div class="done-wrap" id="doneWrap" hidden>
-      <div class="done-card" role="status">
-        <h2>Home, at last.</h2>
-        <p>Every little thing found its place.</p>
-        <button id="btnAgain" class="btn btn-big" type="button">Play again</button>
-      </div>
-    </div>
-    `,
-  );
-  root.appendChild(stage);
+export class TideView {
+  readonly canvas: HTMLCanvasElement;
+  world: World;
+  model: TideGame;
+  private hooks: ViewHooks;
+  private anim: ViewAnim = newViewAnim();
+  private cam: Camera = { x: 0, y: 0, zoom: 10 };
+  private camInit = false;
+  private fitZoom = 10;
+  private dpr = 1;
+  private raf = 0;
+  private lastT = 0;
+  private time = 0;
+  private destroyed = false;
+  private pointerDown = false;
+  private panLast: { x: number; y: number } | null = null;
+  private pinchLast: number | null = null;
+  private lastTap = { at: 0, x: 0, y: 0 };
+  private jarPos: Record<string, { x: number; y: number; rot: number }> = {};
+  private bubbleAt = 0;
+  private unlocked: Set<SkillId> = new Set();
+  readonly skills: SkillState = { cooldownsUntil: {}, activeUntil: {} };
 
-  const hudPlaced = stage.querySelector('#hudPlaced')!;
-  const hudTotal = stage.querySelector('#hudTotal')!;
-  const hint = stage.querySelector<HTMLElement>('#hint')!;
-  const fx = stage.querySelector<HTMLElement>('#fx')!;
-  const doneWrap = stage.querySelector<HTMLElement>('#doneWrap')!;
-  const btnMess = stage.querySelector('#btnMess')!;
-  const btnReset = stage.querySelector('#btnReset')!;
-  const hudChips = stage.querySelector<HTMLElement>('#hudChips')!;
-  const hudSub = stage.querySelector<HTMLElement>('.hud-sub')!;
-  const btnMute = stage.querySelector('#btnMute')!;
-  const btnAgain = stage.querySelector('#btnAgain')!;
+  constructor(canvas: HTMLCanvasElement, world: World, unlocked: SkillId[], hooks: ViewHooks) {
+    this.canvas = canvas;
+    this.world = world;
+    this.hooks = hooks;
+    this.unlocked = new Set(unlocked);
+    this.model = new TideGame(world, { unlocked: this.unlocked });
+    this.jarPos = { ...world.jarScatter };
+    this.resize();
+    window.addEventListener('resize', this.onResize);
+    this.attachInput();
+    this.lastT = performance.now();
+    this.raf = requestAnimationFrame(this.loop);
+  }
 
-  hudTotal.textContent = String(game.progress().total);
+  setUnlocked(ids: SkillId[]): void {
+    this.unlocked = new Set(ids);
+    this.model.setUnlocked(ids);
+  }
 
-  // sparkles for the completion moment (deterministic, gentle)
-  const sparks = stage.querySelector('.fx-sparks')!;
-  const sparkSpecs = [8, 22, 37, 49, 58, 66, 74, 83, 91, 15, 44, 70, 29, 87];
-  sparkSpecs.forEach((left, i) => {
-    const s = document.createElement('span');
-    s.className = 'sparkle';
-    s.style.left = `${left}%`;
-    s.style.top = `${18 + ((i * 29) % 55)}%`;
-    s.style.animationDelay = `${(i % 7) * 0.22}s`;
-    s.style.background = ['#f6efe0', '#e8a06b', '#7fb3a9'][i % 3];
-    s.style.animationDuration = `${2.2 + (i % 4) * 0.5}s`;
-    sparks.appendChild(s);
-  });
+  /** Swap in a freshly generated tide. */
+  setWorld(world: World): void {
+    this.world = world;
+    this.model = new TideGame(world, { unlocked: this.unlocked });
+    this.anim = newViewAnim();
+    this.jarPos = { ...world.jarScatter };
+    this.camInit = false;
+    this.resize();
+    this.emitProgress();
+  }
 
-  // ---- item rendering ----------------------------------------------------
+  private onResize = (): void => this.resize();
 
-  /** Display orientation of a resting item (C-9): books stand upright on
-   *  bookshelf tiers — in slots or on the tier surface — flat everywhere else. */
-  function orientationForLoc(def: ItemDef, loc: ItemLocation): 'flat' | 'upright' {
-    if (def.asset !== 'book') return 'flat';
-    if (loc.kind === 'slot') return 'upright';
-    if (loc.kind === 'surface') {
-      return orientationForPlacement(level, def, loc.surfaceId);
+  private resize(): void {
+    const rect = this.canvas.getBoundingClientRect();
+    this.dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.canvas.width = Math.max(1, Math.round(rect.width * this.dpr));
+    this.canvas.height = Math.max(1, Math.round(rect.height * this.dpr));
+    this.fitCamera();
+  }
+
+  private fitCamera(): void {
+    const w = this.world.shore.w + this.world.wall.w + 6;
+    const h = this.world.shore.h + 8;
+    const rect = this.canvas.getBoundingClientRect();
+    this.fitZoom = Math.min(rect.width / w, rect.height / h);
+    const z = this.cam.zoom;
+    if (!this.camInit || z < this.fitZoom * 0.45 || z > this.fitZoom * 4) {
+      this.cam.zoom = this.fitZoom * 0.98;
+      this.cam.x = w / 2 - 3;
+      this.cam.y = h / 2 - 3;
+      this.camInit = true;
     }
-    return 'flat';
   }
 
-  function makeItemNode(def: ItemDef, orient: 'flat' | 'upright'): { root: SVGGElement; art: SVGGElement; shadow: SVGEllipseElement } {
-    const root = el<SVGGElement>('g', { class: 'item', 'data-item-id': def.id });
-    const r = itemShadowRx[def.asset] ?? 0.15;
-    // generous, explicit grab area (transparent rect — reliable hit-testing)
-    const hit = el<SVGRectElement>('rect', {
-      class: 'item-hit',
-      x: fmt(-r * 1.5), y: fmt(-r * 1.15),
-      width: fmt(r * 3), height: fmt(r * 2.1),
-      fill: 'transparent', stroke: 'none',
-    });
-    const shadow = el<SVGEllipseElement>('ellipse', {
-      class: 'item-shadow',
-      cx: 0, cy: 0,
-      rx: fmt(r * 1.2247),
-      ry: fmt(r * 1.2247 * 0.42),
-      'pointer-events': 'none',
-    });
-    const art = el<SVGGElement>('g', { class: 'art' });
-    art.appendChild(itemAssets[def.asset](def.variant, orient));
-    root.append(hit, shadow, art);
-    return { root, art, shadow };
+  resetCamera(): void {
+    this.cam.zoom = this.fitZoom * 0.98;
+    const w = this.world.shore.w + this.world.wall.w + 6;
+    const h = this.world.shore.h + 8;
+    this.cam.x = w / 2 - 3;
+    this.cam.y = h / 2 - 3;
   }
 
-  /** Painter key for a resting item (C-6, support-relative): floor items key
-   *  plain x + y; items resting on furniture F (slot or surface) key
-   *  depth(F) + ε so the support never paints over what stands on it; the
-   *  item's own position breaks ties within one support. */
-  function itemPaintKey(loc: ItemLocation): number {
-    const SUB = 0.0005; // within-support tie-break
-    const EPS = 0.01; // above the support
-    if (loc.kind === 'held') return 0; // held items render in the drag layer, never here
-    if (loc.kind === 'floor') return loc.x + loc.y;
-    if (loc.kind === 'slot') {
-      const slot = game.slotById(loc.slotId)!;
-      const host = game.hostSurfaceIdOfSlot(slot);
-      const base = host && host !== 'floor'
-        ? furnitureKey(game.surfaceById(host)?.furnitureId)
-        : slot.anchor.x + slot.anchor.y;
-      return base + EPS + (slot.anchor.x + slot.anchor.y) * SUB;
+  // ————— coordinate helpers —————
+
+  private toWorld(px: number, py: number): { x: number; y: number } {
+    const rect = this.canvas.getBoundingClientRect();
+    return {
+      x: (px - rect.left - rect.width / 2) / this.cam.zoom + this.cam.x,
+      y: (py - rect.top - rect.height / 2) / this.cam.zoom + this.cam.y,
+    };
+  }
+
+  // ————— input —————
+
+  private attachInput(): void {
+    const c = this.canvas;
+    c.style.touchAction = 'none';
+    c.addEventListener('pointerdown', this.onDown);
+    c.addEventListener('pointermove', this.onMove);
+    c.addEventListener('pointerup', this.onUp);
+    c.addEventListener('pointercancel', this.onUp);
+    c.addEventListener('wheel', this.onWheel, { passive: false });
+    c.addEventListener('dblclick', this.onDbl);
+    window.addEventListener('keydown', this.onKey);
+  }
+
+  dispose(): void {
+    this.destroyed = true;
+    cancelAnimationFrame(this.raf);
+    window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('keydown', this.onKey);
+    const c = this.canvas;
+    c.removeEventListener('pointerdown', this.onDown);
+    c.removeEventListener('pointermove', this.onMove);
+    c.removeEventListener('pointerup', this.onUp);
+    c.removeEventListener('pointercancel', this.onUp);
+    c.removeEventListener('wheel', this.onWheel);
+    c.removeEventListener('dblclick', this.onDbl);
+  }
+
+  private onDown = (e: PointerEvent): void => {
+    audio.unlock();
+    audio.startLayers();
+    try { this.canvas.setPointerCapture(e.pointerId); } catch { /* synthetic/lost pointer — capture is cosmetic */ }
+    this.pointerDown = true;
+    const w = this.toWorld(e.clientX, e.clientY);
+    const hit = this.hitTest(w);
+    if (hit.kind === 'critter') {
+      if (this.model.pickCritter(hit.id)) {
+        audio.play('pickup');
+        this.syncCarried(w);
+      } else if (this.model.heldKind.kind === 'critters') {
+        this.hooks.onHint('Hands full — drop what you carry first (or unlock Both Paws).');
+      }
+    } else if (hit.kind === 'jar') {
+      if (this.model.pickJar(hit.id)) {
+        audio.play('pickup');
+        this.anim.carriedJar = { id: hit.id, x: w.x, y: w.y, species: hit.species, sealed: true };
+      }
+    } else {
+      this.panLast = { x: e.clientX, y: e.clientY };
     }
-    const s = game.surfaceById(loc.surfaceId)!;
-    if (!s.furnitureId) return loc.x + loc.y; // floor-entry rests key plain
-    return furnitureKey(s.furnitureId) + EPS + (loc.x + loc.y) * SUB;
-  }
-
-  function furnitureKey(furnitureId: string | undefined): number {
-    if (!furnitureId) return 0;
-    const f = level.furniture.find((x) => x.id === furnitureId);
-    if (!f) return 0;
-    return pj.depth(f.anchor.x, f.anchor.y) + (f.sortBias ?? 0);
-  }
-
-  function renderItems(): void {
-    layers.drag.replaceChildren(); // drop any leftover drag-layer node
-    const itemEntries = game.items
-      .map((def) => {
-        const loc = game.locationOf(def.id)!;
-        if (loc.kind === 'slot') {
-          const a = game.slotById(loc.slotId)!.anchor;
-          return { def, x: a.x, y: a.y, z: a.z, rot: 0, orient: orientationForLoc(def, loc), key: itemPaintKey(loc) };
-        }
-        if (loc.kind === 'surface') {
-          const s = game.surfaceById(loc.surfaceId)!;
-          return { def, x: loc.x, y: loc.y, z: s.topZ, rot: loc.rotation, orient: orientationForLoc(def, loc), key: itemPaintKey(loc) };
-        }
-        if (loc.kind === 'held') return null; // being dragged — lives in the drag layer
-        return {
-          def, x: loc.x, y: loc.y, z: 0, rot: loc.rotation,
-          orient: orientationForLoc(def, loc),
-          key: itemPaintKey(loc),
-        };
-      })
-      .filter((e): e is NonNullable<typeof e> => e !== null);
-    const paint: Array<{ node: SVGGElement; key: number }> = [];
-    for (const e of itemEntries) {
-      const { root } = makeItemNode(e.def, e.orient);
-      const p = pj.toScreen(e.x, e.y, e.z);
-      root.setAttribute('transform', `translate(${fmt(p.x)} ${fmt(p.y)})${e.rot ? ` rotate(${fmt(e.rot)})` : ''}`);
-      paint.push({ node: root, key: e.key });
-    }
-    // merged, support-relative paint list: furniture + items, one order (C-6)
-    for (const fe of scene.furniturePaint) paint.push(fe);
-    paint.sort((a, b) => a.key - b.key);
-    layers.props.replaceChildren(...paint.map((e) => e.node));
-  }
-
-  function updateHud(): void {
-    const p = game.progress();
-    hudPlaced.textContent = String(p.placed);
-    hudTotal.textContent = String(p.total);
-  }
-
-  // collection chips (CC-014): filled = currently complete; quiet un-fill on a
-  // committed break; rendered from collectionStatus() on committed changes only
-  const CHIP_COLORS: Record<string, string> = {
-    red: P.terracotta, green: P.leaf, blue: P.slateBlue,
   };
-  const chipEls = new Map<string, HTMLElement>();
-  for (const c of level.collections ?? []) {
-    const chip = document.createElement('span');
-    chip.className = 'chip';
-    chip.dataset.collection = c.id;
-    chip.title = c.label;
-    const dot = document.createElement('span');
-    dot.className = 'chip-dot';
-    dot.style.background = CHIP_COLORS[c.colorKey] ?? P.cream;
-    chip.appendChild(dot);
-    hudChips.appendChild(chip);
-    chipEls.set(c.id, chip);
-  }
 
-  function updateChips(): void {
-    for (const s of game.collectionStatus()) {
-      chipEls.get(s.id)?.classList.toggle('on', s.complete);
+  private onMove = (e: PointerEvent): void => {
+    const w = this.toWorld(e.clientX, e.clientY);
+    if (this.pointerDown && this.panLast) {
+      const rect = this.canvas.getBoundingClientRect();
+      const dx = (e.clientX - this.panLast.x) / rect.width;
+      const dy = (e.clientY - this.panLast.y) / rect.height;
+      this.cam.x -= dx * (rect.width / this.cam.zoom);
+      this.cam.y -= dy * (rect.height / this.cam.zoom);
+      this.panLast = { x: e.clientX, y: e.clientY };
+      this.clampCam();
+      return;
     }
+    if (this.pointerDown && this.pinchLast !== null) return;
+    this.syncCarried(w);
+    this.anim.hover = this.hoverTarget(w);
+  };
+
+  private onUp = (e: PointerEvent): void => {
+    this.pointerDown = false;
+    this.panLast = null;
+    this.pinchLast = null;
+    const w = this.toWorld(e.clientX, e.clientY);
+
+    // double-tap detection (manual — dblclick is unreliable on touch)
+    const now = performance.now();
+    if (now - this.lastTap.at < 320 && Math.hypot(e.clientX - this.lastTap.x, e.clientY - this.lastTap.y) < 24) {
+      this.lastTap = { at: 0, x: 0, y: 0 };
+      this.onDbl(e);
+      return;
+    }
+    this.lastTap = { at: now, x: e.clientX, y: e.clientY };
+
+    const target = this.hoverTarget(w);
+    const held = this.model.heldKind;
+    if (held.kind === 'critters' && held.ids.length > 0) {
+      // resolve the LEAD carried critter against the nearest open jar — an
+      // exact match files; a mismatch is a polite 'wrong' (streak resets, the
+      // critter stays in hand); nothing nearby returns everything home
+      const lead = held.ids[0];
+      const jar = this.nearestOpenJar(w);
+      if (!jar) this.model.releaseAll();
+      else this.model.fileCritter(lead, jar);
+    } else if (held.kind === 'jar') {
+      const jarId = held.id;
+      const cubby = this.cubbyAt(w);
+      if (cubby && target?.kind === 'cubby') {
+        this.model.shelveJar(jarId, cubby);
+      } else {
+        // put the jar down where the player dropped it (rearranging is QoL)
+        this.model.releaseAll();
+        const shore = this.world.shore;
+        this.jarPos[jarId] = {
+          x: Math.max(shore.x + 4, Math.min(shore.x + shore.w - 4, w.x)),
+          y: Math.max(shore.y + 4, Math.min(shore.y + shore.h - 4, w.y)),
+          rot: 0,
+        };
+      }
+    }
+    if (this.model.heldKind.kind === 'none') {
+      this.anim.carried = [];
+      this.anim.carriedJar = null;
+      this.anim.carriedTarget = null;
+    } else {
+      this.syncCarried(w); // keep the rest of the fan visibly in hand
+    }
+    this.anim.hover = null;
+    this.consumeEvents();
+  };
+
+  private onWheel = (e: WheelEvent): void => {
+    e.preventDefault();
+    const before = this.toWorld(e.clientX, e.clientY);
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    this.cam.zoom = Math.max(this.fitZoom * 0.45, Math.min(this.fitZoom * 4, this.cam.zoom * factor));
+    const after = this.toWorld(e.clientX, e.clientY);
+    this.cam.x += before.x - after.x;
+    this.cam.y += before.y - after.y;
+    this.clampCam();
+  };
+
+  private onKey = (e: KeyboardEvent): void => {
+    if (e.target instanceof HTMLElement && ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+    const pan = 46 / this.cam.zoom;
+    if (e.key === 'ArrowLeft' || e.key === 'a') { this.cam.x -= pan; this.clampCam(); }
+    else if (e.key === 'ArrowRight' || e.key === 'd') { this.cam.x += pan; this.clampCam(); }
+    else if (e.key === 'ArrowUp' || e.key === 'w') { this.cam.y -= pan; this.clampCam(); }
+    else if (e.key === 'ArrowDown' || e.key === 's') { this.cam.y += pan; this.clampCam(); }
+    else if (e.key === '+' || e.key === '=') { this.cam.zoom = Math.min(this.fitZoom * 4, this.cam.zoom * 1.15); }
+    else if (e.key === '-' || e.key === '_') { this.cam.zoom = Math.max(this.fitZoom * 0.45, this.cam.zoom / 1.15); }
+    else if (e.key === '0') { this.resetCamera(); }
+  };
+
+  private onDbl = (e: PointerEvent | MouseEvent): void => {
+    const w = this.toWorld((e as PointerEvent).clientX, (e as PointerEvent).clientY);
+    const hit = this.hitTest(w);
+    const speed = this.unlocked.has('slipstream') ? 1.6 : 1; // Slipstream passive
+    if (hit.kind === 'critter') {
+      const heldIds = this.model.heldKind.kind === 'critters' ? [...this.model.heldKind.ids] : [];
+      if (heldIds.includes(hit.id)) {
+        // convenience: file everything in hand right now
+        if (this.model.fileAllHeld() > 0) this.consumeEvents();
+        return;
+      }
+      const jarId = this.model.flyTargetJar(hit.id);
+      if (!jarId || this.anim.flights.some((f) => f.critterId === hit.id)) return;
+      const jp = this.jarPos[jarId];
+      const dist = Math.hypot(jp.x - w.x, jp.y - w.y);
+      this.anim.flights.push({
+        critterId: hit.id,
+        fromX: this.world.scatter[hit.id].x, fromY: this.world.scatter[hit.id].y,
+        toX: jp.x, toY: jp.y,
+        t: 0, dur: Math.min(1.1, 0.35 + dist * 0.02) / speed, onArrive: 'file',
+      });
+    } else if (hit.kind === 'jar') {
+      const jarId = hit.id;
+      if (this.anim.flights.some((f) => f.jarId === jarId)) return;
+      const alreadyHeld = this.model.heldKind.kind === 'jar' && this.model.heldKind.id === jarId;
+      if (!alreadyHeld && !this.model.pickJar(jarId)) return;
+      const cubbyId = this.model.flyTargetCubby(jarId);
+      if (!cubbyId) { this.model.releaseAll(); this.consumeEvents(); return; }
+      const jp = this.jarPos[jarId];
+      const cubby = this.world.cubbies.find((k) => k.id === cubbyId)!;
+      const cols = Math.max(...this.world.cubbies.map((k) => k.col)) + 1;
+      const rows = Math.max(...this.world.cubbies.map((k) => k.row)) + 1;
+      const toX = this.world.wall.x + (cubby.col + 0.5) * (this.world.wall.w / cols);
+      const toY = this.world.wall.y + (cubby.row + 0.5) * (this.world.wall.h / rows);
+      const dist = Math.hypot(toX - jp.x, toY - jp.y);
+      this.anim.flights.push({
+        jarId, cubbyId, fromX: jp.x, fromY: jp.y, toX, toY,
+        t: 0, dur: Math.min(1.3, 0.45 + dist * 0.02) / speed, onArrive: 'shelve',
+      });
+      this.anim.carriedJar = null;
+    }
+  };
+
+  // ————— hit testing / targets —————
+
+  private hitTest(w: { x: number; y: number }): { kind: 'critter' | 'jar'; id: string; species: string } | { kind: 'none' } {
+    const minPx = 30 / this.cam.zoom;
+    // critters first (topmost by y)
+    const loose = this.world.critters
+      .filter((c) => this.model.critterLocation(c.id) === 'loose')
+      .sort((a, b) => this.world.scatter[b.id].y - this.world.scatter[a.id].y);
+    for (const c of loose) {
+      const p = this.world.scatter[c.id];
+      const sp = this.world.species.find((s) => s.id === c.species)!;
+      const r = Math.max(sp.size + 0.7, minPx);
+      if (Math.hypot(p.x - w.x, p.y - w.y) <= r) return { kind: 'critter', id: c.id, species: c.species };
+    }
+    for (const jar of this.world.jars) {
+      if (this.model.jarLocation(jar.id) !== 'loose') continue;
+      const p = this.jarPos[jar.id];
+      if (Math.hypot(p.x - w.x, p.y - w.y) <= Math.max(3.1, minPx)) return { kind: 'jar', id: jar.id, species: jar.species };
+    }
+    return { kind: 'none' };
   }
 
-  function updateSeedTitle(): void {
-    hudSub.title = `seed: ${game.currentSeed}`;
+  private nearestOpenJar(w: { x: number; y: number }): string | null {
+    const magnet = Math.max(3.4, 34 / this.cam.zoom);
+    let best: string | null = null;
+    let bestD = magnet;
+    for (const jar of this.world.jars) {
+      if (this.model.jarLocation(jar.id) !== 'loose' || this.model.isSealed(jar.id)) continue;
+      const p = this.jarPos[jar.id];
+      const d = Math.hypot(p.x - w.x, p.y - w.y);
+      if (d < bestD) { bestD = d; best = jar.id; }
+    }
+    return best;
   }
 
-  // ---- pointer → world ----------------------------------------------------
-
-  function pointerToFloor(e: PointerEvent): { x: number; y: number } {
-    const ctm = svg.getScreenCTM();
-    if (!ctm) return { x: 0, y: 0 };
-    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
-    return pj.toFloor(p.x, p.y);
-  }
-
-  function worldToClient(x: number, y: number, z = 0): { x: number; y: number } {
-    const p = pj.toScreen(x, y, z);
-    const ctm = svg.getScreenCTM();
-    if (!ctm) return { x: p.x, y: p.y };
-    const pt = new DOMPoint(p.x, p.y).matrixTransform(ctm);
-    return { x: pt.x, y: pt.y };
-  }
-
-  /** Nearest `[data-surface]` group under the pointer, topmost first (C-10).
-   *  The dragged item and non-surface art are skipped by the walk. */
-  function resolveSurface(e: PointerEvent): string | null {
-    for (const node of document.elementsFromPoint(e.clientX, e.clientY)) {
-      const g = node.closest('[data-surface]');
-      const id = g?.getAttribute('data-surface');
-      if (id) return id;
+  private cubbyAt(w: { x: number; y: number }): string | null {
+    const wall = this.world.wall;
+    const cols = Math.max(...this.world.cubbies.map((c) => c.col)) + 1;
+    const rows = Math.max(...this.world.cubbies.map((c) => c.row)) + 1;
+    const cw = wall.w / cols;
+    const ch = wall.h / rows;
+    for (const cubby of this.world.cubbies) {
+      const cx = wall.x + cubby.col * cw;
+      const cy = wall.y + cubby.row * ch;
+      if (w.x > cx - 1 && w.x < cx + cw + 1 && w.y > cy - 1 && w.y < cy + ch + 1) return cubby.id;
     }
     return null;
   }
 
-  // ---- ghost + zone hints ---------------------------------------------------
-
-  function showGhost(slot: SlotDef | null): void {
-    for (const g of scene.ghostBySlot.values()) g.classList.remove('on');
-    if (slot) scene.ghostBySlot.get(slot.id)?.classList.add('on');
-  }
-
-  /** Draw the dragged item's current-orientation footprint outline at a surface
-   *  point, projected onto that surface's plane — fit or no-fit (physical
-   *  information only; collection state is unreachable here, R4). */
-  function showSurfaceGhost(itemId: string, surfaceId: string, px: number, py: number, fit: boolean): void {
-    for (const g of scene.ghostBySurface.values()) g.classList.remove('on');
-    const g = scene.ghostBySurface.get(surfaceId);
-    const surface = game.surfaceById(surfaceId);
-    const def = game.itemById(itemId);
-    if (!g || !surface || !def) return;
-    const fp = itemFootprint(def.asset, orientationForPlacement(level, def, surfaceId));
-    if (!fp) return;
-    const x0 = -fp.dx / 2, x1 = fp.dx / 2;
-    const oy = fp.offsetY ?? 0;
-    const y0 = -fp.dy / 2 + oy, y1 = fp.dy / 2 + oy;
-    const pt = (lx: number, ly: number) => { const p = ip(lx, ly, 0); return `${fmt(p[0])},${fmt(p[1])}`; };
-    g.querySelector('.surface-ghost-shape')!.setAttribute('d',
-      `M ${pt(x0, y0)} L ${pt(x1, y0)} L ${pt(x1, y1)} L ${pt(x0, y1)} Z`);
-    const strike = g.querySelector('.surface-ghost-strike')!;
-    const a = ip(x0, y0, 0), b = ip(x1, y1, 0);
-    strike.setAttribute('x1', fmt(a[0])); strike.setAttribute('y1', fmt(a[1]));
-    strike.setAttribute('x2', fmt(b[0])); strike.setAttribute('y2', fmt(b[1]));
-    const p = pj.toScreen(px, py, surface.topZ);
-    g.setAttribute('transform', `translate(${fmt(p.x)} ${fmt(p.y)})`);
-    g.classList.toggle('fit', fit);
-    g.classList.toggle('no-fit', !fit);
-    g.classList.add('on');
-  }
-
-  function showZoneHints(category: string): void {
-    for (const t of scene.labelByCategory.values()) t.classList.remove('on');
-    scene.labelByCategory.get(category)?.classList.add('on');
-  }
-
-  function hideHints(): void {
-    showGhost(null);
-    for (const g of scene.ghostBySurface.values()) g.classList.remove('on');
-    for (const t of scene.labelByCategory.values()) t.classList.remove('on');
-  }
-
-  // ---- dragging -------------------------------------------------------------
-
-  let drag: DragState | null = null;
-
-  function setDragTransform(d: DragState, wx: number, wy: number, z: number, scale: number): void {
-    const p = pj.toScreen(wx, wy, z);
-    d.node.setAttribute('transform', `translate(${fmt(p.x)} ${fmt(p.y)}) scale(${fmt(scale)})`);
-    const f = pj.toScreen(wx, wy, 0);
-    d.shadow.setAttribute('transform', `translate(${fmt(f.x - p.x)} ${fmt(f.y - p.y)}) scale(${fmt(scale > 1 ? 0.82 : 1)})`);
-    d.shadow.style.opacity = scale > 1 ? '0.55' : '1';
-  }
-
-  function updateDrag(e: PointerEvent): void {
-    if (!drag) return;
-    const w = pointerToFloor(e);
-    // slightly negative bounds let wall-mounted slots (rack, shelves) be reached
-    const tx = clamp(w.x + drag.offX, -0.9, level.room.width + 0.6);
-    const ty = clamp(w.y + drag.offY, -0.9, level.room.depth + 0.6);
-    drag.tx = tx;
-    drag.ty = ty;
-    setDragTransform(drag, tx, ty, LIFT, DRAG_SCALE);
-
-    // (1) slot match wins (existing radius + carry-height compensation)
-    const slotMatch = game.findDropTarget(drag.id, tx, ty, DROP_RADIUS, LIFT);
-    if (slotMatch) {
-      drag.target = { type: 'slot', slotId: slotMatch.id };
-      showGhost(slotMatch);
-      for (const g of scene.ghostBySurface.values()) g.classList.remove('on');
-      return;
-    }
-    showGhost(null);
-
-    // (2) hovered [data-surface] → aim through that surface's plane (C-2):
-    // the floor-projected pointer shifts by (+topZ, +topZ) — the exact inverse
-    // of the projector's z offset (a surface point (px, py, topZ) floor-projects
-    // to (px − topZ, py − topZ); ISO_SIN = 0.5)
-    const hovered = resolveSurface(e);
-    if (hovered && hovered !== 'floor' && game.surfaceById(hovered)) {
-      const s = game.surfaceById(hovered)!;
-      const px = w.x + s.topZ;
-      const py = w.y + s.topZ;
-      drag.target = { type: 'surface', surfaceId: hovered, x: px, y: py };
-      showSurfaceGhost(drag.id, hovered, px, py, game.validateSurfaceDrop(drag.id, hovered, px, py).ok);
-      return;
-    }
-
-    // (3) implicit floor — the plain floor-plane mapping at the carried position
-    drag.target = { type: 'surface', surfaceId: 'floor', x: tx, y: ty };
-    showSurfaceGhost(drag.id, 'floor', tx, ty, game.validateSurfaceDrop(drag.id, 'floor', tx, ty).ok);
-  }
-
-  function endDragVisuals(d: DragState): void {
-    d.node.classList.remove('dragging');
-    hideHints();
-  }
-
-  function animateSettle(d: DragState, anchor: { x: number; y: number; z: number }, orient: 'flat' | 'upright' | null): void {
-    const startX = d.tx;
-    const startY = d.ty;
-    const startZ = LIFT;
-    const t0 = performance.now();
-    // books swap orientation as they land (stand up on tiers, lie down elsewhere)
-    if (orient) {
-      const def = game.itemById(d.id)!;
-      const fresh = itemAssets[def.asset](def.variant, orient);
-      d.art.replaceChildren(...Array.from(fresh.childNodes));
-    }
-    const step = (now: number) => {
-      const t = clamp((now - t0) / SNAP_MS, 0, 1);
-      const k = easeOut(t);
-      const wx = startX + (anchor.x - startX) * k;
-      const wy = startY + (anchor.y - startY) * k;
-      const z = startZ + (anchor.z - startZ) * k;
-      const scale = 1 + (DRAG_SCALE - 1) * (1 - k);
-      setDragTransform(d, wx, wy, z, scale);
-      if (t < 1) {
-        d.raf = requestAnimationFrame(step);
-      } else {
-        renderItems();
-        updateHud();
+  /** The magnetic candidate: the exact-match jar for carried critters, or the
+   *  matching cubby for the carried jar — shown as a glowing ring. */
+  private hoverTarget(w: { x: number; y: number }): ViewAnim['hover'] {
+    const held = this.model.heldKind;
+    if (held.kind === 'critters' && held.ids.length > 0) {
+      const first = this.world.critters.find((k) => k.id === held.ids[0]);
+      if (first) {
+        const jar = this.nearestOpenJar(w);
+        if (jar === first.jarId) return { kind: 'jar', id: jar };
       }
-    };
-    d.raf = requestAnimationFrame(step);
+    }
+    if (held.kind === 'jar') {
+      const jar = this.world.jars.find((j) => j.id === held.id)!;
+      const cubby = this.cubbyAt(w);
+      if (cubby) {
+        const target = this.world.cubbies.find((c) => c.id === cubby)!;
+        if (target.species === jar.species) return { kind: 'cubby', id: cubby };
+      }
+    }
+    return null;
   }
 
-  /** Settle anchor for a committed target. */
-  function anchorFor(target: DropTarget): { x: number; y: number; z: number } {
-    if (target.type === 'slot') return game.slotById(target.slotId)!.anchor;
-    const s = game.surfaceById(target.surfaceId)!;
-    return { x: target.x, y: target.y, z: s.topZ };
+  private syncCarried(w: { x: number; y: number }): void {
+    if (this.model.heldKind.kind === 'critters') {
+      const ids = [...this.model.heldKind.ids];
+      this.anim.carried = ids.map((id) => {
+        const c = this.world.critters.find((k) => k.id === id)!;
+        const sp = this.world.species.find((s) => s.id === c.species)!;
+        const prev = this.anim.carried.find((k) => k.id === id);
+        return { id, species: c.species, golden: c.golden, size: sp.size, x: prev?.x ?? w.x, y: prev?.y ?? w.y };
+      });
+      this.anim.carriedJar = null;
+      this.anim.carriedTarget = w;
+    } else if (this.model.heldKind.kind === 'jar') {
+      const id = this.model.heldKind.id;
+      const prev = this.anim.carriedJar;
+      this.anim.carriedJar = prev && prev.id === id ? prev : { id, x: w.x, y: w.y, species: this.world.jars.find((j) => j.id === id)!.species, sealed: true };
+      this.anim.carriedTarget = w;
+    } else {
+      this.anim.carried = [];
+      this.anim.carriedJar = null;
+      this.anim.carriedTarget = null;
+    }
   }
 
-  /** Orientation the item lands with for a committed target. */
-  function orientForTarget(def: ItemDef, target: DropTarget): 'flat' | 'upright' | null {
-    if (def.asset !== 'book') return null;
-    if (target.type === 'slot') return 'upright';
-    return isTierSurface(level, target.surfaceId) ? 'upright' : 'flat';
+  private clampCam(): void {
+    const w = this.world.shore.w + this.world.wall.w + 6;
+    const h = this.world.shore.h + 8;
+    this.cam.x = Math.max(-4, Math.min(w + 4, this.cam.x));
+    this.cam.y = Math.max(-4, Math.min(h + 4, this.cam.y));
   }
 
-  /** The one commit consumer for normal drops AND restore drops (C-17/Q2):
-   *  sound, settle, HUD, tier-collection feedback, completion card. Feedback
-   *  consumes only commit-time data from the model — an exact put-back or a
-   *  cancel-restore never carries a transition, so it can never re-celebrate. */
-  function applyCommittedDrop(res: Extract<ReturnType<TidyingGame['drop']>, { ok: true }>, d: DragState, sound: 'place' | 'return'): void {
-    audio.play(sound);
-    hint.classList.add('faded');
-    animateSettle(d, anchorFor(res.target), orientForTarget(game.itemById(d.id)!, res.target));
-    updateHud();
-    updateChips();
-    for (const cid of res.collectionCompleted ?? []) {
-      const delay = (celebrationCount++) % 4 * 250; // concurrent completions stagger (A4)
-      window.setTimeout(() => {
-        const st = game.collectionStatus().find((c) => c.id === cid);
-        if (st?.complete && st.tierId) {
-          tierAnimation(st.tierId);
-          audio.play('collection');
+  /** World → CSS pixel coords (e2e observability: lets tests drive real input). */
+  worldToScreen(x: number, y: number): { x: number; y: number } {
+    const rect = this.canvas.getBoundingClientRect();
+    return { x: rect.left + (x - this.cam.x) * this.cam.zoom + rect.width / 2, y: rect.top + (y - this.cam.y) * this.cam.zoom + rect.height / 2 };
+  }
+
+  // ————— particles —————
+
+  private burst(x: number, y: number, hue: number, n = 10, kind: 'spark' | 'ring' = 'spark'): void {
+    const cap = 320;
+    if (this.anim.particles.length > cap) return;
+    const rand = mulberry32((x * 1000 + y * 37 + performance.now()) | 0);
+    for (let i = 0; i < n; i++) {
+      const a = rand() * Math.PI * 2;
+      const v = 2 + rand() * 5;
+      this.anim.particles.push({
+        x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 2,
+        life: 0.7 + rand() * 0.5, maxLife: 1.2, size: 0.25 + rand() * 0.3, hue, kind,
+      });
+    }
+  }
+
+  // ————— skills —————
+
+  activateSkill(id: SkillId): boolean {
+    const now = performance.now();
+    if (!this.unlocked.has(id) || (this.skills.cooldownsUntil[id] ?? 0) > now) return false;
+    if (id === 'tidePull') {
+      const n = this.model.tidePull(3);
+      if (n === 0) return false;
+      this.skills.cooldownsUntil[id] = now + (45_000);
+      audio.play('skill');
+      this.consumeEvents();
+      return true;
+    }
+    if (id === 'moonlight') {
+      this.anim.moonlightUntil = now + 10_000;
+      this.skills.cooldownsUntil[id] = now + (30_000);
+      audio.play('skill');
+      return true;
+    }
+    if (id === 'gullsEye') {
+      this.anim.gullsEyeUntil = now + 12_000;
+      this.skills.cooldownsUntil[id] = now + (60_000);
+      audio.play('skill');
+      return true;
+    }
+    return false;
+  }
+
+  // ————— model events → effects —————
+
+  private consumeEvents(): void {
+    const evs = this.model.consumeEvents();
+    let progressDirty = evs.length > 0;
+    for (const ev of evs) {
+      switch (ev.t) {
+        case 'filed': {
+          const jp = this.jarPos[ev.jarId];
+          this.anim.splash.push({ x: jp.x, y: jp.y - 1, at: performance.now() });
+          audio.play('plop', ev.fillIndex - 1);
+          if (ev.golden) {
+            audio.play('golden');
+            this.burst(jp.x, jp.y - 2, 48, 16);
+          }
+          break;
         }
-      }, delay);
-    }
-    if (res.completed) celebrate();
-  }
-
-  let celebrationCount = 0;
-
-  /** Short animation anchored at the completed tier (CC-008): a glowing tier
-   *  outline + gentle sparks in the existing FX language; self-clears. */
-  function tierAnimation(tierId: string): void {
-    const s = game.surfaceById(tierId);
-    if (!s) return;
-    const cx = (s.bounds.minX + s.bounds.maxX) / 2;
-    const cy = (s.bounds.minY + s.bounds.maxY) / 2;
-    const w = s.bounds.maxX - s.bounds.minX;
-    const dep = s.bounds.maxY - s.bounds.minY;
-    const g = el<SVGGElement>('g', { class: 'tier-fx' });
-    const p = pj.toScreen(cx, cy, s.topZ);
-    g.setAttribute('transform', `translate(${fmt(p.x)} ${fmt(p.y)})`);
-    const pt = (lx: number, ly: number) => { const q = ip(lx, ly, 0); return `${fmt(q[0])},${fmt(q[1])}`; };
-    g.appendChild(el('path', {
-      class: 'tier-fx-outline',
-      d: `M ${pt(-w / 2, -dep / 2)} L ${pt(w / 2, -dep / 2)} L ${pt(w / 2, dep / 2)} L ${pt(-w / 2, dep / 2)} Z`,
-    }));
-    for (let i = 0; i < 6; i++) {
-      const a = (i / 6) * Math.PI * 2;
-      const q = ip(Math.cos(a) * w * 0.34, Math.sin(a) * dep * 0.34, 0);
-      const spark = el('circle', { class: 'tier-fx-spark', cx: fmt(q[0]), cy: fmt(q[1] - 0.12), r: fmt(0.05) });
-      spark.style.animationDelay = `${i * 0.09}s`;
-      g.appendChild(spark);
-    }
-    layers.fx.appendChild(g);
-    window.setTimeout(() => g.remove(), 1500);
-  }
-
-  function restoreItem(d: DragState): void {
-    const from = d.from;
-    if (from.kind === 'slot') {
-      const res = game.drop(d.id, { type: 'slot', slotId: from.slotId });
-      if (res.ok) {
-        applyCommittedDrop(res, d, 'return');
-        return;
-      }
-      // deterministic fallback: floor near the drop point (C-18)
-      game.returnToFloor(d.id, d.tx, d.ty, 0);
-      renderItems();
-      updateHud();
-      return;
-    }
-    if (from.kind === 'surface') {
-      const res = game.drop(d.id, { type: 'surface', surfaceId: from.surfaceId, x: from.x, y: from.y });
-      if (res.ok) {
-        applyCommittedDrop(res, d, 'return');
-        return;
-      }
-      game.returnToFloor(d.id, d.tx, d.ty, 0);
-      renderItems();
-      updateHud();
-      return;
-    }
-    game.returnToFloor(d.id, from.x, from.y, from.rotation);
-    audio.play('return');
-    animateSettle(d, { x: from.x, y: from.y, z: 0 }, 'flat');
-  }
-
-  function finishDrag(): void {
-    if (!drag) return;
-    const d = drag;
-    drag = null;
-    endDragVisuals(d);
-    if (d.raf) cancelAnimationFrame(d.raf);
-    const target = d.target;
-    if (target) {
-      const res = game.drop(d.id, target);
-      if (res.ok) {
-        applyCommittedDrop(res, d, 'place');
-        return;
+        case 'wrong':
+          audio.play('wrong');
+          break;
+        case 'bounce':
+          audio.play('bounce');
+          break;
+        case 'sealed': {
+          const jp = this.jarPos[ev.jarId];
+          const ordinal = (parseInt(ev.jarId.split('#')[1], 10) || 1) - 1;
+          audio.play('seal', ordinal);
+          this.burst(jp.x, jp.y - 2, 52, 14);
+          this.burst(jp.x, jp.y - 2, 52, 1, 'ring');
+          break;
+        }
+        case 'shelved': {
+          const cubby = this.world.cubbies.find((c) => c.id === ev.cubbyId)!;
+          const cols = Math.max(...this.world.cubbies.map((c) => c.col)) + 1;
+          const rows = Math.max(...this.world.cubbies.map((c) => c.row)) + 1;
+          const x = this.world.wall.x + (cubby.col + 0.5) * (this.world.wall.w / cols);
+          const y = this.world.wall.y + (cubby.row + 0.5) * (this.world.wall.h / rows);
+          audio.play('shelf');
+          this.burst(x, y, 45, 10);
+          if (ev.speciesDone) this.burst(x, y, 48, 22);
+          break;
+        }
+        case 'streak':
+          audio.play('streak');
+          this.hooks.onStreak(ev.n);
+          break;
+        case 'xp':
+          this.hooks.onXp(ev.total, ev.level, ev.amount);
+          break;
+        case 'unlock':
+          this.hooks.onUnlock(ev.skillId);
+          break;
+        case 'lore':
+          audio.play('lore');
+          this.hooks.onLore(ev.line);
+          break;
+        case 'hint':
+          this.hooks.onHint(ev.text);
+          break;
+        case 'complete':
+          audio.play('finale');
+          this.anim.finaleGlow = 1;
+          this.hooks.onComplete(ev.stats);
+          break;
       }
     }
-    restoreItem(d);
-    updateHud();
+    if (progressDirty) this.emitProgress();
   }
 
-  function cancelDrag(): void {
-    if (!drag) return;
-    const d = drag;
-    drag = null;
-    endDragVisuals(d);
-    if (d.raf) cancelAnimationFrame(d.raf);
-    restoreItem(d);
-    updateHud();
+  private emitProgress(): void {
+    const total = this.world.critters.length;
+    const filed = this.world.critters.filter((c) => this.model.critterLocation(c.id) === 'jarred').length;
+    this.hooks.onProgress({
+      crittersFiled: filed,
+      crittersTotal: total,
+      jarsSealed: this.world.jars.filter((j) => this.model.isSealed(j.id)).length,
+      jarsTotal: this.world.jars.length,
+      jarsShelved: this.world.jars.filter((j) => this.model.jarLocation(j.id) === 'shelved').length,
+      streak: this.model.currentStreak,
+    });
   }
 
-  svg.addEventListener('pointerdown', (e: PointerEvent) => {
-    if (drag || game.isComplete()) return;
-    const hit = (e.target as Element).closest('[data-item-id]') as SVGGElement | null;
-    if (!hit) return;
-    const id = hit.getAttribute('data-item-id')!;
-    const def = game.itemById(id);
-    const picked = game.pickUp(id);
-    if (!picked.ok || !picked.from || !def) return;
-    audio.unlock();
-    audio.play('pickup');
+  // ————— main loop —————
 
-    const w = pointerToFloor(e);
-    const from = picked.from;
-    const cur = from.kind === 'slot' ? game.slotById(from.slotId)!.anchor
-      : from.kind === 'surface' ? { x: from.x, y: from.y }
-      : { x: from.x, y: from.y };
-    layers.drag.appendChild(hit);
-    hit.classList.add('dragging');
-    showZoneHints(def.category);
-    drag = {
-      id,
-      pointerId: e.pointerId,
-      from,
-      offX: cur.x - w.x,
-      offY: cur.y - w.y,
-      tx: cur.x,
-      ty: cur.y,
-      target: null,
-      node: hit,
-      art: hit.querySelector('.art') as SVGGElement,
-      shadow: hit.querySelector('.item-shadow') as SVGEllipseElement,
-      variant: def.variant,
-      asset: def.asset,
-      raf: 0,
-    };
-    svg.setPointerCapture(e.pointerId);
-    updateDrag(e);
-    updateHud();
-    e.preventDefault();
-  });
+  private loop = (now: number): void => {
+    if (this.destroyed) return;
+    const dt = Math.min(0.05, (now - this.lastT) / 1000);
+    this.lastT = now;
+    this.time += dt;
 
-  svg.addEventListener('pointermove', (e: PointerEvent) => {
-    if (drag && e.pointerId === drag.pointerId) updateDrag(e);
-  });
-  svg.addEventListener('pointerup', (e: PointerEvent) => {
-    if (drag && e.pointerId === drag.pointerId) finishDrag();
-  });
-  svg.addEventListener('pointercancel', (e: PointerEvent) => {
-    if (drag && e.pointerId === drag.pointerId) cancelDrag();
-  });
-  window.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.key === 'Escape') cancelDrag();
-  });
-
-  // ---- completion & buttons --------------------------------------------------
-
-  function celebrate(): void {
-    audio.play('complete');
-    fx.hidden = false;
-    window.setTimeout(() => {
-      doneWrap.hidden = false;
-      requestAnimationFrame(() => doneWrap.classList.add('show'));
-    }, 900);
-  }
-
-  function resetGame(): void {
-    cancelDrag();
-    doneWrap.classList.remove('show');
-    doneWrap.hidden = true;
-    fx.hidden = true;
-    game.reset(); // same seed → identical layout (CC-013)
-    renderItems();
-    updateHud();
-    updateChips();
-    updateSeedTitle();
-    hint.classList.remove('faded');
-  }
-
-  function newMessGame(): void {
-    cancelDrag();
-    doneWrap.classList.remove('show');
-    doneWrap.hidden = true;
-    fx.hidden = true;
-    game.newMess(); // fresh seed → another layout, state quietly cleared
-    renderItems();
-    updateHud();
-    updateChips();
-    updateSeedTitle();
-    hint.classList.remove('faded');
-  }
-
-  btnReset.addEventListener('click', () => {
-    audio.unlock();
-    audio.play('return');
-    resetGame();
-  });
-  btnMess.addEventListener('click', () => {
-    audio.unlock();
-    audio.play('return');
-    newMessGame();
-  });
-  btnAgain.addEventListener('click', () => {
-    audio.unlock();
-    audio.play('pickup');
-    newMessGame(); // "Play again" behaves as New Mess (A3)
-  });
-  btnMute.addEventListener('click', () => {
-    const muted = !audio.isMuted();
-    audio.setMuted(muted);
-    btnMute.setAttribute('aria-pressed', String(muted));
-    btnMute.classList.toggle('muted', muted);
-    if (!muted) {
-      audio.unlock();
-      audio.play('pickup');
+    // carried items spring toward the pointer
+    const tgt = this.anim.carriedTarget;
+    if (tgt) {
+      const k = Math.min(1, dt * 16);
+      for (const c of this.anim.carried) { c.x += (tgt.x - c.x) * k; c.y += (tgt.y - c.y) * k; }
+      if (this.anim.carriedJar) { this.anim.carriedJar.x += (tgt.x - this.anim.carriedJar.x) * k; this.anim.carriedJar.y += (tgt.y - this.anim.carriedJar.y) * k; }
     }
-  });
 
-  // read-only debug/testing hook (used by the e2e script; never mutates state)
-  const cozyHook: Record<string, unknown> = {
-    game,
-    level,
-    itemClientPos: (id: string) => {
-      const loc = game.locationOf(id)!;
-      const w =
-        loc.kind === 'slot' ? game.slotById(loc.slotId)!.anchor
-        : loc.kind === 'surface' ? { x: loc.x, y: loc.y, z: game.surfaceById(loc.surfaceId)?.topZ ?? 0 }
-        : loc.kind === 'floor' ? { x: loc.x, y: loc.y, z: 0 }
-        : { x: 0, y: 0, z: 0 };
-      return worldToClient(w.x, w.y, w.z);
-    },
-    clientFromWorld: (x: number, y: number, z = 0) => worldToClient(x, y, z),
+    // flights
+    for (const f of [...this.anim.flights]) {
+      f.t += dt;
+      if (f.t >= f.dur) {
+        this.anim.flights.splice(this.anim.flights.indexOf(f), 1);
+        if (f.onArrive === 'file' && f.critterId) this.model.flyFile(f.critterId);
+        if (f.onArrive === 'shelve' && f.jarId && f.cubbyId) this.model.shelveJar(f.jarId, f.cubbyId);
+        this.consumeEvents();
+      }
+    }
+
+    // particles
+    for (const p of [...this.anim.particles]) {
+      p.life -= dt;
+      if (p.life <= 0) { this.anim.particles.splice(this.anim.particles.indexOf(p), 1); continue; }
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += (p.kind === 'bubble' ? -6 : 9) * dt;
+    }
+    this.anim.splash = this.anim.splash.filter((s) => performance.now() - s.at < 500);
+
+    // finale glow decay
+    if (this.anim.finaleGlow > 0) this.anim.finaleGlow = Math.max(0, this.anim.finaleGlow - dt * 0.25);
+
+    // ambient bubbles in open jars
+    if (this.time - this.bubbleAt > 1.4) {
+      this.bubbleAt = this.time;
+      const open = this.world.jars.filter((j) => this.model.jarLocation(j.id) === 'loose' && !this.model.isSealed(j.id) && this.model.fillOf(j.id) > 0);
+      if (open.length > 0 && this.anim.particles.length < 200) {
+        const jar = open[Math.floor(Math.random() * open.length)];
+        const sp = this.world.species.find((s) => s.id === jar.species)!;
+        this.anim.particles.push({
+          x: this.jarPos[jar.id].x + (Math.random() - 0.5) * 2,
+          y: this.jarPos[jar.id].y - 1,
+          vx: 0, vy: -3, life: 1.1, maxLife: 1.1, size: 0.25, hue: sp.hue, kind: 'bubble',
+        });
+      }
+    }
+
+    drawScene(this.canvas, {
+      world: { ...this.world, jarScatter: this.jarPos },
+      model: this.model,
+      anim: this.anim,
+      time: this.time,
+      nowMs: performance.now(),
+    }, this.cam, this.canvas.clientWidth, this.canvas.clientHeight, this.dpr);
+
+    this.raf = requestAnimationFrame(this.loop);
   };
-  // read-only snapshot getter — callers cannot mutate the internal log (C-14)
-  Object.defineProperty(cozyHook, 'lastSfx', {
-    get: () => audio.sfxLogSnapshot(),
-    enumerable: true,
-  });
-  ;(window as unknown as Record<string, unknown>).__cozy = cozyHook;
-
-  renderItems();
-  updateHud();
-  updateChips();
-  updateSeedTitle();
 }

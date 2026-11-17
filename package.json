@@ -1,9 +1,9 @@
 {
-  "name": "cozy-corner-tidying",
+  "name": "tide-and-tidy",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "One-level browser prototype of a cozy PC tidying game. Vite + vanilla TypeScript + SVG.",
+  "description": "Tide & Tidy — a calm, random 2D tidy-up game. Jar every critter, shelve every jar. Vite + vanilla TS + Canvas + Web Audio.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

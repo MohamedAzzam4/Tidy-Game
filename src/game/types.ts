@@ -1,162 +1,123 @@
 /**
- * Shared level & model types. Pure data — no DOM types here.
+ * Tide & Tidy — shared world & model types. Pure data, no DOM types.
  *
- * Room coordinate system: the origin (0,0) is the *back corner* of the room
- * (the corner farthest from the camera). +x runs along the right-hand wall,
- * +y runs along the left-hand wall, z is up. The front corner (width, depth)
- * is the open cutaway corner the camera looks into.
+ * Mechanic mapping from the reference game (Filing Good: Tidy Up, demo):
+ *   sheet → binder (symbol + number)  ≙  critter → specimen jar (species + tag)
+ *   binder → shelf slot (symbol)      ≙  sealed jar → cubby (species glyph)
  *
- * Everything in this file stays in room units. No screen-space values live in
- * data — this is what keeps a later camera change possible (plan §8.9).
+ * World units are abstract canvas units (≈ metres of beach). The renderer maps
+ * them through a pan/zoom camera; no screen-space values live here.
  */
 
-export type CategoryId = 'book' | 'mug' | 'cushion' | 'shoe' | 'towel';
+/** One sea-treasure species. `glyph` selects the procedural painter used for
+ *  critter, jar tag and cubby marking; `hue` is the palette anchor (0-360). */
+export interface SpeciesDef {
+  id: string;
+  label: string;
+  hue: number;
+  glyph: 'star' | 'shell' | 'jelly' | 'crab' | 'glass' | 'dollar' | 'clam' | 'urchin' | 'float' | 'conch' | 'anemone' | 'ring';
+  /** Visual size class 0.8-1.6 (critter radius in world units at scale 1). */
+  size: number;
+}
 
-/** World position in room units. */
-export interface WorldPos {
+/** Difficulty/volume preset. Grid = cubby wall arrangement. */
+export interface ScaleDef {
+  id: 'drift' | 'ebb' | 'undertow';
+  label: string;
+  blurb: string;
+  gridCols: number;
+  gridRows: number;
+  jarsPerSpecies: number;
+  jarCapacity: number;
+}
+
+/** One specimen jar. It is uniquely identified by species + 1-based tag —
+ *  exactly the "symbol and number" identity of a binder in the reference. */
+export interface JarDef {
+  id: string;
+  species: string;
+  tag: number;
+  capacity: number;
+}
+
+/** One movable sea critter. Belongs to exactly one jar (species + tag). */
+export interface CritterDef {
+  id: string;
+  species: string;
+  jarId: string;
+  /** Rare shimmering variant — the variable-ratio reward (~1 in 25). */
+  golden: boolean;
+}
+
+/** A wall niche that accepts any sealed jar of its species. */
+export interface CubbyDef {
+  id: string;
+  species: string;
+  col: number;
+  row: number;
+}
+
+export interface ScatterPos {
   x: number;
   y: number;
-  z: number;
+  rot: number;
 }
 
-/** One drop target inside a zone. Any free slot of the matching zone is valid. */
-export interface SlotDef {
-  id: string;
-  zoneId: string;
-  /** Where a placed item's anchor sits. */
-  anchor: WorldPos;
+/** Seeded decor (pebbles, foam flecks, lanterns) so a tide code reproduces
+ *  the whole picture, not just the playable items. */
+export interface Decor {
+  pebbles: Array<{ x: number; y: number; r: number; hue: number }>;
+  shells: Array<{ x: number; y: number; rot: number; hue: number }>;
+  lanterns: Array<{ x: number; y: number }>;
 }
 
-/** A destination area (bookshelf, kitchen rack, sofa, entry mat, linen shelf). */
-export interface ZoneDef {
-  id: string;
-  label: string;
-  /** Only items of this category may enter this zone's slots. */
-  category: CategoryId;
-  slots: SlotDef[];
-  /** Where the floating zone label sits (world coords). */
-  labelAnchor: WorldPos;
+/** Full generated world for one tide (one run). */
+export interface World {
+  seed: number;
+  scale: ScaleDef;
+  species: SpeciesDef[];
+  jars: JarDef[];
+  critters: CritterDef[];
+  cubbies: CubbyDef[];
+  /** Loose critter scatter on the shore, keyed by critter id. */
+  scatter: Record<string, ScatterPos>;
+  /** Loose jar scatter, keyed by jar id. */
+  jarScatter: Record<string, ScatterPos>;
+  /** Shore band where loose things live. */
+  shore: { x: number; y: number; w: number; h: number };
+  /** Driftwood cubby wall band (right side of the world). */
+  wall: { x: number; y: number; w: number; h: number };
+  decor: Decor;
 }
 
-/** Ground AABB + upright height of one drawn item, in room units.
- *  dx/dy = full ground extent of the drawn base layer, centered on the anchor
- *  (C-3/Q3 convention); `height` = top of the drawn item.
- *  `offsetY` (optional) shifts the AABB center along +y when the art is not
- *  anchor-centered (the drawn shoe pair — registry consumes it, D-13). */
-export interface ItemFootprint {
-  dx: number;
-  dy: number;
-  height: number;
-  offsetY?: number;
+/** Events the model emits; the view/audio layer consumes and clears them. */
+export type GameEvent =
+  | { t: 'filed'; critterId: string; jarId: string; fillIndex: number; golden: boolean }
+  | { t: 'wrong'; jarId: string }
+  | { t: 'bounce'; critterId?: string; jarId?: string }
+  | { t: 'sealed'; jarId: string; species: string }
+  | { t: 'shelved'; jarId: string; cubbyId: string; speciesDone: boolean }
+  | { t: 'streak'; n: number }
+  | { t: 'xp'; amount: number; total: number; level: number }
+  | { t: 'unlock'; skillId: import('./skills').SkillId }
+  | { t: 'lore'; line: string }
+  | { t: 'hint'; text: string }
+  | { t: 'complete'; stats: RunStats };
+
+export interface RunStats {
+  elapsedMs: number;
+  mistakes: number;
+  goldenFound: number;
+  bestStreak: number;
+  crittersFiled: number;
+  jarsSealed: number;
+  jarsShelved: number;
 }
 
-/** Books lie flat everywhere except on bookshelf tiers, where they stand upright. */
-export type ItemOrientation = 'flat' | 'upright';
+/** What the player is currently holding — critters or one jar, never both
+ *  (the "hand" mirrors carrying a binder after filling it). */
+export type Held =
+  | { kind: 'critters'; ids: string[] }
+  | { kind: 'jar'; id: string }
+  | { kind: 'none' };
 
-/**
- * Footprint table for movable items: `ITEM_FOOTPRINTS[asset][orientation]`.
- * Books carry both orientations; every other category has a single entry
- * under 'flat'. Values are conservative variant maxima pinned to the drawn
- * builders (decision Q3: if a value and the art disagree, the art wins).
- */
-export type ItemFootprintTable = {
-  [asset: string]: { [o in ItemOrientation]?: ItemFootprint };
-};
-
-/**
- * Footprint table for furniture: `FURNITURE_FOOTPRINTS[furnitureId]` — the
- * ground AABB used to exclude floor drops from furniture footprints. Flat
- * decals (rug, entry mat) and wall-mounted pieces are deliberately absent:
- * floor under them stays walkable.
- */
-export type FurnitureFootprintTable = { [furnitureId: string]: ItemFootprint };
-
-/** An axis-aligned rectangle in room floor coordinates (room units). */
-export interface Aabb {
-  minX: number;
-  maxX: number;
-  minY: number;
-  maxY: number;
-}
-
-/**
- * A placeable surface: any drawn flat top an item may rest on, plus the walkable
- * floor. `topZ` is the top face of the drawn placement surface (the height an
- * item rests at). `clearance` defaults to room.wallHeight − topZ and is pinned
- * explicitly whenever art sits above the surface (A9).
- */
-export interface SurfaceDef {
-  id: string;
-  /** Which furniture provides it (absent for the floor entry). */
-  furnitureId?: string;
-  kind: 'floor' | 'furniture';
-  /** Usable placement area in room floor units (props already subtracted via the obstacle registry). */
-  bounds: Aabb;
-  /** Top face of the drawn placement surface (the walkable height). */
-  topZ: number;
-  /** Free height above the surface; default = room.wallHeight − topZ. */
-  clearance?: number;
-}
-
-/** A book collection — four same-color books that must share one clean shelf tier. */
-export interface CollectionDef {
-  id: string;
-  label: string;
-  colorKey: 'red' | 'green' | 'blue';
-}
-
-/** A movable object. */
-export interface ItemDef {
-  id: string;
-  category: CategoryId;
-  /** Asset key in the view's asset catalog (`src/view/assets.ts`). */
-  asset: string;
-  /** Variation index for repeated objects (color / shape tweaks). */
-  variant: number;
-  /** Scattered floor position where the item starts (z is implicitly 0). */
-  start: { x: number; y: number };
-  /** Small screen-space rotation (degrees) for the scattered pose. */
-  startRotation?: number;
-  /** Collection this book belongs to (books only; CC-007 evaluates tier-clean). */
-  collectionId?: string;
-}
-
-/** Static scenery that is rendered from the shared asset catalog. */
-export interface FurnitureDef {
-  id: string;
-  asset: string;
-  /** Floor anchor of the furniture footprint center. */
-  anchor: WorldPos;
-  /** Optional tweak to the painter's-algorithm sort order (default 0). */
-  sortBias?: number;
-  /** Flat pieces (rug, entry mat) render into the floor-decal layer. */
-  flat?: boolean;
-}
-
-export interface RoomDef {
-  width: number;
-  depth: number;
-  wallHeight: number;
-}
-
-export interface LevelDef {
-  id: string;
-  name: string;
-  room: RoomDef;
-  furniture: FurnitureDef[];
-  zones: ZoneDef[];
-  items: ItemDef[];
-  /** Placeable surfaces (floor + furniture flat tops). Optional so minimal
-   *  synthetic levels compile; the shipped level registers the full set.
-   *  (No seed field — the game instance owns the live seed and `?seed=`; A3/CC-013.) */
-  surfaces?: SurfaceDef[];
-  /** Book collections (books only). Optional until CC-011 ships them. */
-  collections?: CollectionDef[];
-}
-
-/** Where a drag may land: either a zone slot or a point on a registered surface.
- *  A floor drop commits as `{ type: 'surface', surfaceId: 'floor', x, y }` (the
- *  registry's floor entry) and stores location kind `'floor'` (C-21). */
-export type DropTarget =
-  | { type: 'slot'; slotId: string }
-  | { type: 'surface'; surfaceId: string; x: number; y: number };

@@ -1,528 +1,308 @@
-import type {
-  Aabb,
-  DropTarget,
-  ItemDef,
-  ItemOrientation,
-  LevelDef,
-  SlotDef,
-  SurfaceDef,
-  ZoneDef,
-} from './types';
-import {
-  FURNITURE_FOOTPRINTS,
-  SLOT_GHOST_FOOTPRINTS,
-  SURFACE_OBSTACLES,
-  footprintAabb,
-  itemFootprint,
-} from '../level/footprints';
-import { scatter } from './scatter';
-
-/** Where an item currently is. `'held'` means it is being dragged. */
-export type ItemLocation =
-  | { kind: 'floor'; x: number; y: number; rotation: number }
-  | { kind: 'slot'; slotId: string }
-  | { kind: 'surface'; surfaceId: string; x: number; y: number; rotation: number }
-  | { kind: 'held' };
-
-export type DropRejection =
-  | 'unknown-item'
-  | 'unknown-slot'
-  | 'not-held'
-  | 'wrong-category'
-  | 'slot-occupied'
-  | 'no-surface'
-  | 'out-of-bounds'
-  | 'insufficient-clearance'
-  | 'footprint-overlap'
-  | 'blocked-by-furniture';
-
-export type DropResult =
-  | {
-      ok: true;
-      itemId: string;
-      /** The committed destination (slot or surface point) — one shape for both drop paths. */
-      target: DropTarget;
-      placed: number;
-      total: number;
-      completed: boolean;
-      /** CC-007: collections that just transitioned incomplete→complete (anti-spam channel). */
-      collectionCompleted?: string[];
-    }
-  | { ok: false; itemId: string; reason: DropRejection };
-
-export interface PickupResult {
-  ok: boolean;
-  /** Previous location when ok — the view uses it to restore on cancel. */
-  from?: Exclude<ItemLocation, { kind: 'held' }>;
-}
-
-export interface Progress {
-  placed: number;
-  total: number;
-}
-
-/** One collection's committed status — the ONLY surface exposing collection
- *  state (R4 no-hint guarantee; the drag/preview path must never call it).
- *  `tierId` names the tier hosting a complete collection (CC-008's animation anchor). */
-export interface CollectionStatus {
-  id: string;
-  label: string;
-  colorKey: 'red' | 'green' | 'blue';
-  complete: boolean;
-  tierId?: string;
-}
-
-/** AABB overlap tolerance (room units): touching edges are allowed (plan §8.2). */
-export const OVERLAP_EPS = 0.01;
-/** Slots anchored at or below this height count as anchored on walkable floor (C-5×C-22). */
-const FLOOR_SLOT_Z = 0.15;
-/** z tolerance when matching a slot anchor to its hosting surface top face. */
-const SLOT_SURFACE_Z_EPS = 0.02;
-
 /**
- * The orientation rule (C-9): books on bookshelf tiers — in slots or on the
- * tier surface — are upright; everywhere else (counter, sofa, linen, floor)
- * they are flat. Other categories only have a flat footprint.
- */
-export function isTierSurface(level: LevelDef, surfaceId: string): boolean {
-  const shelfIds = new Set(level.furniture.filter((f) => f.asset === 'bookshelf').map((f) => f.id));
-  const s = level.surfaces?.find((x) => x.id === surfaceId);
-  return !!s && !!s.furnitureId && shelfIds.has(s.furnitureId);
-}
-
-export function orientationForPlacement(level: LevelDef, item: ItemDef, surfaceId: string): ItemOrientation {
-  if (item.asset === 'book' && isTierSurface(level, surfaceId)) return 'upright';
-  return 'flat';
-}
-
-function overlaps(a: Aabb, b: Aabb): boolean {
-  return (
-    a.minX < b.maxX - OVERLAP_EPS && b.minX < a.maxX - OVERLAP_EPS &&
-    a.minY < b.maxY - OVERLAP_EPS && b.minY < a.maxY - OVERLAP_EPS
-  );
-}
-
-/**
- * Pure game rules: slot occupancy, free placement on surfaces (footprint inside
- * surface bounds, height clearance, non-overlap, furniture exclusion), progress,
- * completion. Imports nothing from the DOM or SVG — the view asks *this* model
- * whether a drop is valid; it never invents its own rules.
+ * Tide & Tidy game model — pure rules, no DOM, no timers. The view does
+ * spatial hit-testing (it owns coordinates) and calls these methods; every
+ * mutation appends events (types.ts GameEvent) that view/audio consume.
  *
- * The number of required placements comes from the level data
- * (`level.items.length`), never from a hardcoded total.
+ * Two-stage mechanic, matching the reference game's sheet→binder→shelf:
+ *   file critters into their exact jar (species + tag), then shelve the
+ *   sealed jar into any cubby carrying that species glyph. No fail state —
+ *   mistakes are feedback (streak resets), never loss.
  */
-export class TidyingGame {
-  readonly level: LevelDef;
-  /** The live seed (A3): drives the scattered layout; `Reset` replays it, `New
-   *  Mess` draws a fresh one. `?seed=` pins it for deterministic tests. */
-  private seed: number;
-  private slotItem = new Map<string, string | null>();
-  private location = new Map<string, ItemLocation>();
-  private heldId: string | null = null;
-  /** Pre-pickup floor rotation per item, preserved for committed floor re-drops. */
-  private lastFloorRotation = new Map<string, number>();
-  /** Committed collection statuses (Q2): recomputed only on committed changes,
-   *  never on pickup — while an item is held, statuses hold their last values. */
-  private collectionCache: CollectionStatus[] = [];
+import type { CritterDef, GameEvent, Held, JarDef, RunStats, World } from './types';
+import { levelFromXp, SKILL_DEFS, SKILL_IDS, type SkillId } from './skills';
 
-  constructor(level: LevelDef, seed?: number) {
-    this.level = level;
-    this.seed = (seed ?? (Math.random() * 0x100000000)) >>> 0;
-    this.reset();
-  }
+/** Lore drops (the reference community asked for more of these) — one line
+ *  per 5th shelved jar and one at the finale, in order. */
+export const LORE: string[] = [
+  'The hut keeper logs every tide. Nobody remembers who reads the ledgers — that was never the point.',
+  'Rule one of the shore: what the sea scatters, someone will sort. It has always been so.',
+  'The jars were a gift from a ship that never docked. They hold everything except grudges.',
+  'Some nights the lanterns light themselves. The keeper stopped questioning it around the third winter.',
+  'A golden pearl is the tide saying thank you. It does not explain further.',
+  'The cubbies are carved from one broken hull. The wood still hums in storms.',
+  'Ledger fragment: "sorted 768 shells today. the silence had weight, like a good blanket."',
+  'The hermit crabs hold elections. The ballots are pebbles. Turnout is excellent.',
+  'Tide code, scratched beside the door: the same mess can be visited twice, like a dream.',
+  'The keeper says a filled jar sounds different from an empty one. Filing is listening, if you try.',
+  'Moon jellies are kept in the cool shelf. They dream in slow colors.',
+  'Every shell here was lost by something. Sorting gives the losing a shape.',
+  'The gull has opinions about the kelp. It files complaints by screaming near shelf four.',
+  'Ledger fragment: "a stranger left a jar of glass that is not glass. it hums when it rains."',
+  'When the last niche fills, the tide comes in to admire the work. Then it starts again.',
+  'The keeper\'s only rule, carved above the lanterns: one shell at a time, and the day will do the rest.',
+];
 
-  get currentSeed(): number {
-    return this.seed;
-  }
+const LORE_EVERY = 5;
+const XP_FILE = 1;
+const XP_GOLDEN_BONUS = 9;
+const XP_SEAL = 5;
+const XP_SHELVE = 3;
+const XP_COMPLETE = 50;
+const STREAK_MILESTONE = 5;
 
-  /** Restore the initial scattered state (CC-013): re-scatter with the SAME
-   *  seed → identical layout; an explicit seed argument re-seeds first. */
-  reset(seed?: number): void {
-    if (seed !== undefined) this.seed = seed >>> 0;
-    this.slotItem.clear();
-    this.location.clear();
-    this.lastFloorRotation.clear();
-    for (const zone of this.level.zones) {
-      for (const slot of zone.slots) this.slotItem.set(slot.id, null);
+export interface ModelSkillView {
+  unlocked: Set<SkillId>;
+}
+
+export class TideGame {
+  readonly world: World;
+  events: GameEvent[] = [];
+
+  private held: Held = { kind: 'none' };
+  private critterState: Record<string, 'loose' | 'held' | 'jarred'> = {};
+  private jarState: Record<string, 'loose' | 'held' | 'shelved'> = {};
+  private jarFill: Record<string, number> = {};
+  private jarCubby: Record<string, string> = {};
+  private xpTotal = 0;
+  private level = 1;
+  private streak = 0;
+  private mistakes = 0;
+  private goldenFound = 0;
+  private bestStreak = 0;
+  private filed = 0;
+  private sealedCount = 0;
+  private shelvedCount = 0;
+  private loreIndex = 0;
+  private startedAt = Date.now();
+  private skills: ModelSkillView;
+
+  constructor(world: World, skills: ModelSkillView = { unlocked: new Set() }) {
+    this.world = world;
+    this.skills = skills;
+    for (const c of world.critters) this.critterState[c.id] = 'loose';
+    for (const j of world.jars) {
+      this.jarState[j.id] = 'loose';
+      this.jarFill[j.id] = 0;
     }
-    const positions = scatter(this.seed, this.level);
-    this.level.items.forEach((item, i) => {
-      const p = positions[i];
-      this.location.set(item.id, { kind: 'floor', x: p.x, y: p.y, rotation: p.rotation });
-    });
-    this.heldId = null;
-    this.collectionCache = this.computeCollections();
   }
 
-  /** New Mess (CC-013): a fresh seed → another layout; all state quietly
-   *  cleared (collection statuses reset silently, no celebration channel). */
-  newMess(): void {
-    this.reset((Math.random() * 0x100000000) >>> 0);
+  setUnlocked(ids: Iterable<SkillId>): void {
+    this.skills.unlocked = new Set(ids);
   }
 
-  // ---- queries ---------------------------------------------------------
-
-  get items(): readonly ItemDef[] {
-    return this.level.items;
+  private emit(e: GameEvent): void {
+    this.events.push(e);
   }
 
-  get heldItem(): string | null {
-    return this.heldId;
-  }
-
-  /** Progress counts NON-FLOOR valid placements (slot or surface): floor rests
-   *  keep `kind: 'floor'` and do not count (C-21); held items count as not placed. */
-  progress(): Progress {
-    let placed = 0;
-    for (const item of this.level.items) {
-      const loc = this.location.get(item.id);
-      if (loc && (loc.kind === 'slot' || (loc.kind === 'surface' && loc.surfaceId !== 'floor'))) placed++;
-    }
-    return { placed, total: this.level.items.length };
-  }
-
-  /** Tidy-all win rule (D3, CC-007): every item on a valid NON-FLOOR placement
-   *  (slot or surface — the walkable entry mat is floor and does not count)
-   *  AND all three collections complete at the same time. Levels without
-   *  collections complete on placements alone. Evaluated from the committed
-   *  status cache — never mid-drag. */
-  isComplete(): boolean {
-    const p = this.progress();
-    if (!(p.total > 0 && p.placed === p.total)) return false;
-    return this.collectionCache.every((c) => c.complete);
-  }
-
-  // ---- collections (CC-007) ----------------------------------------------
-
-  tierSurfaceIds(): string[] {
-    const shelfIds = new Set(this.level.furniture.filter((f) => f.asset === 'bookshelf').map((f) => f.id));
-    return (this.level.surfaces ?? [])
-      .filter((s) => s.furnitureId && shelfIds.has(s.furnitureId))
-      .map((s) => s.id);
-  }
-
-  /** Which bookshelf tier an item rests on (slot or tier surface), or null. */
-  tierOfItem(itemId: string): string | null {
-    const loc = this.location.get(itemId);
-    if (!loc) return null;
-    if (loc.kind === 'surface') return isTierSurface(this.level, loc.surfaceId) ? loc.surfaceId : null;
-    if (loc.kind === 'slot') {
-      const slot = this.slotById(loc.slotId);
-      if (!slot) return null;
-      const host = this.hostSurfaceIdOfSlot(slot);
-      return host && host !== 'floor' && isTierSurface(this.level, host) ? host : null;
-    }
-    return null;
-  }
-
-  /** The tier-clean rule (D2 as revised by Q1 = C-1(a)): collection c is
-   *  complete iff all four of its books rest on ONE tier T — any of the four,
-   *  interchangeable — and every item on T belongs to c. Tiers are evaluated
-   *  independently: what rests on other tiers has no effect. */
-  private computeCollections(): CollectionStatus[] {
-    const cols = this.level.collections ?? [];
-    if (!cols.length) return [];
-    const tiers = this.tierSurfaceIds();
-    const onTier = new Map<string, string[]>();
-    for (const t of tiers) onTier.set(t, []);
-    for (const item of this.level.items) {
-      const t = this.tierOfItem(item.id);
-      if (t && onTier.has(t)) onTier.get(t)!.push(item.id);
-    }
-    return cols.map((c) => {
-      const members = this.level.items.filter((i) => i.collectionId === c.id).map((i) => i.id);
-      let tierId: string | undefined;
-      for (const t of tiers) {
-        const occupants = onTier.get(t) ?? [];
-        if (members.every((m) => occupants.includes(m)) && occupants.every((o) => members.includes(o))) {
-          tierId = t;
-          break;
-        }
-      }
-      return { id: c.id, label: c.label, colorKey: c.colorKey, complete: tierId !== undefined, tierId };
-    });
-  }
-
-  /** Committed statuses — recomputed only on committed changes (Q2/A4). */
-  collectionStatus(): CollectionStatus[] {
-    return this.collectionCache.map((s) => ({ ...s }));
-  }
-
-  /** Recompute after a committed change; returns ids that just transitioned
-   *  incomplete→complete (the single celebration channel — breaking is silent). */
-  private refreshCollections(): string[] {
-    const before = new Map(this.collectionCache.map((s) => [s.id, s.complete]));
-    this.collectionCache = this.computeCollections();
-    return this.collectionCache.filter((s) => s.complete && before.get(s.id) === false).map((s) => s.id);
-  }
-
-  locationOf(itemId: string): ItemLocation | undefined {
-    return this.location.get(itemId);
-  }
-
-  /** Item currently sitting in a slot, or null if the slot is free. */
-  occupantOf(slotId: string): string | null {
-    return this.slotItem.get(slotId) ?? null;
-  }
-
-  itemById(itemId: string): ItemDef | undefined {
-    return this.level.items.find((i) => i.id === itemId);
-  }
-
-  slotById(slotId: string): SlotDef | undefined {
-    for (const zone of this.level.zones) {
-      const slot = zone.slots.find((s) => s.id === slotId);
-      if (slot) return slot;
-    }
-    return undefined;
-  }
-
-  zoneOfSlot(slotId: string): ZoneDef | undefined {
-    return this.level.zones.find((z) => z.slots.some((s) => s.id === slotId));
-  }
-
-  zoneForCategory(category: ItemDef['category']): ZoneDef | undefined {
-    return this.level.zones.find((z) => z.category === category);
-  }
-
-  surfaceById(surfaceId: string): SurfaceDef | undefined {
-    return this.level.surfaces?.find((s) => s.id === surfaceId);
-  }
-
-  /** Free height above a surface: pinned clearance, else wallHeight − topZ (A9). */
-  clearanceOf(surface: SurfaceDef): number {
-    return surface.clearance ?? this.level.room.wallHeight - surface.topZ;
-  }
-
-  /**
-   * Nearest free slot of the item's category within `radius` world units of
-   * (x, y) — the forgiving drop radius lives here so the view stays dumb.
-   *
-   * `carryZ` is the height at which the dragged item is being carried. The
-   * match point of a slot is its anchor shifted by the height difference
-   * (carryZ − slot z) along BOTH floor axes, because that is where the player
-   * naturally aims a lifted item to align it visually with an elevated slot.
-   * Floor slots are unaffected for practical purposes.
-   */
-  findDropTarget(itemId: string, x: number, y: number, radius: number, carryZ = 0): SlotDef | null {
-    const item = this.itemById(itemId);
-    if (!item) return null;
-    let best: SlotDef | null = null;
-    let bestDist = radius;
-    for (const zone of this.level.zones) {
-      if (zone.category !== item.category) continue;
-      for (const slot of zone.slots) {
-        if (this.slotItem.get(slot.id)) continue;
-        const dz = carryZ - slot.anchor.z;
-        const d = Math.hypot(slot.anchor.x + dz - x, slot.anchor.y + dz - y);
-        if (d <= bestDist) {
-          bestDist = d;
-          best = slot;
-        }
+  private addXp(amount: number): void {
+    this.xpTotal += amount;
+    const newLevel = levelFromXp(this.xpTotal);
+    this.emit({ t: 'xp', amount, total: this.xpTotal, level: newLevel });
+    if (newLevel > this.level) {
+      this.level = newLevel;
+      for (const s of SKILL_IDS) {
+        if (SKILL_DEFS[s].unlockLevel <= newLevel) this.emit({ t: 'unlock', skillId: s });
       }
     }
-    return best;
   }
 
-  // ---- surface physics (CC-004) ------------------------------------------
-
-  /** Hosting surface id of a slot anchor: the furniture surface whose bounds
-   *  contain the anchor at the anchor's height, else the floor entry for
-   *  slots anchored on walkable floor (C-5×C-22), else null (wall-mounted). */
-  hostSurfaceIdOfSlot(slot: SlotDef): string | null {
-    for (const s of this.surfaces()) {
-      if (s.kind !== 'furniture') continue;
-      const b = s.bounds;
-      if (slot.anchor.x >= b.minX && slot.anchor.x <= b.maxX && slot.anchor.y >= b.minY && slot.anchor.y <= b.maxY &&
-          Math.abs(s.topZ - slot.anchor.z) <= SLOT_SURFACE_Z_EPS) {
-        return s.id;
-      }
-    }
-    const floor = this.surfaceById('floor');
-    if (floor && slot.anchor.z <= FLOOR_SLOT_Z) return 'floor';
-    return null;
+  get carryCap(): number {
+    return 1 + (this.skills.unlocked.has('bothPaws') ? 2 : 0) + (this.skills.unlocked.has('slipstream') ? 1 : 0);
   }
 
-  /** Immovable AABBs that occupied slots reserve on the given surface (C-5). */
-  private reservationsFor(surfaceId: string): Aabb[] {
-    const out: Aabb[] = [];
-    for (const zone of this.level.zones) {
-      for (const slot of zone.slots) {
-        if (!this.slotItem.get(slot.id)) continue;
-        if (this.hostSurfaceIdOfSlot(slot) !== surfaceId) continue;
-        const g = SLOT_GHOST_FOOTPRINTS[zone.category];
-        if (!g) continue;
-        out.push({
-          minX: slot.anchor.x - g.dx / 2, maxX: slot.anchor.x + g.dx / 2,
-          minY: slot.anchor.y - g.dy / 2, maxY: slot.anchor.y + g.dy / 2,
-        });
-      }
-    }
-    return out;
+  get heldKind(): Held { return this.held; }
+
+  get xp(): number { return this.xpTotal; }
+  get currentStreak(): number { return this.streak; }
+
+  isSealed(jarId: string): boolean {
+    const jar = this.world.jars.find((j) => j.id === jarId);
+    return !!jar && this.jarFill[jarId] >= jar.capacity;
   }
 
-  /** Ground AABBs of items already resting on the given surface, optionally
-   *  excluding one item (the one being validated — during a drag it is held,
-   *  and a pure re-check of a resting item must not collide with itself). */
-  private occupantAabbsOn(surfaceId: string, excludeId?: string): Aabb[] {
-    const out: Aabb[] = [];
-    for (const item of this.level.items) {
-      if (item.id === excludeId) continue;
-      const loc = this.location.get(item.id);
-      if (!loc) continue;
-      if (loc.kind === 'surface' && loc.surfaceId === surfaceId) {
-        out.push(this.aabbOnSurface(item, loc.x, loc.y, surfaceId));
-      } else if (surfaceId === 'floor' && loc.kind === 'floor') {
-        out.push(this.aabbOnSurface(item, loc.x, loc.y, 'floor'));
-      }
-    }
-    return out;
-  }
+  fillOf(jarId: string): number { return this.jarFill[jarId] ?? 0; }
+  jarLocation(jarId: string): 'loose' | 'held' | 'shelved' { return this.jarState[jarId]; }
+  critterLocation(id: string): 'loose' | 'held' | 'jarred' { return this.critterState[id]; }
+  cubbyOfJar(jarId: string): string | undefined { return this.jarCubby[jarId]; }
 
-  private aabbOnSurface(item: ItemDef, x: number, y: number, surfaceId: string): Aabb {
-    const fp = itemFootprint(item.asset, orientationForPlacement(this.level, item, surfaceId));
-    if (!fp) return { minX: x, maxX: x, minY: y, maxY: y };
-    return footprintAabb(fp, x, y);
-  }
-
-  /** Pure fit check for a surface drop — drives the drag ghost and the commit.
-   *  Never consults held state or collections (R4 no-hint guarantee). */
-  validateSurfaceDrop(itemId: string, surfaceId: string, x: number, y: number):
-    { ok: true } | { ok: false; reason: DropRejection } {
-    const item = this.itemById(itemId);
-    if (!item) return { ok: false, reason: 'unknown-item' };
-    const surface = this.surfaceById(surfaceId);
-    if (!surface) return { ok: false, reason: 'no-surface' };
-    const fp = itemFootprint(item.asset, orientationForPlacement(this.level, item, surfaceId));
-    if (!fp) return { ok: false, reason: 'unknown-item' };
-    const box = footprintAabb(fp, x, y);
-
-    // 1. bounds — the footprint AABB (centered on the drop point) lies inside the surface
-    const b = surface.bounds;
-    if (box.minX < b.minX - OVERLAP_EPS || box.maxX > b.maxX + OVERLAP_EPS ||
-        box.minY < b.minY - OVERLAP_EPS || box.maxY > b.maxY + OVERLAP_EPS) {
-      return { ok: false, reason: 'out-of-bounds' };
-    }
-    // 2. clearance — the drawn item must fit under whatever is drawn above
-    //    (strict: an exact fit like the 0.36 book under the 0.36 counter gap is allowed)
-    if (fp.height > this.clearanceOf(surface)) {
-      return { ok: false, reason: 'insufficient-clearance' };
-    }
-    // 3. non-overlap with static decor, resting items and slot reservations —
-    //    one occupancy mechanism for both drop paths (C-5)
-    for (const o of SURFACE_OBSTACLES[surfaceId] ?? []) {
-      if (overlaps(box, o)) return { ok: false, reason: 'footprint-overlap' };
-    }
-    for (const r of this.occupantAabbsOn(surfaceId, itemId)) {
-      if (overlaps(box, r)) return { ok: false, reason: 'footprint-overlap' };
-    }
-    for (const r of this.reservationsFor(surfaceId)) {
-      if (overlaps(box, r)) return { ok: false, reason: 'footprint-overlap' };
-    }
-    // 4. floor drops additionally exclude furniture footprints (rug/mat walkable)
-    if (surface.kind === 'floor') {
-      for (const f of this.level.furniture) {
-        if (f.flat) continue;
-        const fp2 = FURNITURE_FOOTPRINTS[f.id];
-        if (!fp2) continue;
-        const fb: Aabb = {
-          minX: f.anchor.x - fp2.dx / 2, maxX: f.anchor.x + fp2.dx / 2,
-          minY: f.anchor.y - fp2.dy / 2, maxY: f.anchor.y + fp2.dy / 2,
-        };
-        if (overlaps(box, fb)) return { ok: false, reason: 'blocked-by-furniture' };
-      }
-    }
-    return { ok: true };
-  }
-
-  private surfaces(): SurfaceDef[] {
-    return this.level.surfaces ?? [];
-  }
-
-  // ---- commands --------------------------------------------------------
-
-  /**
-   * Lift an item. A placed item frees its slot immediately, so the slot can
-   * never be silently swapped and the item can be re-placed anywhere. Picking
-   * up never recomputes collection status (Q2) — it is not a committed change.
-   */
-  pickUp(itemId: string): PickupResult {
-    const loc = this.location.get(itemId);
-    if (!loc || loc.kind === 'held' || this.heldId !== null || this.isComplete()) {
-      return { ok: false };
-    }
-    this.location.set(itemId, { kind: 'held' });
-    this.heldId = itemId;
-    if (loc.kind === 'slot') this.slotItem.set(loc.slotId, null);
-    if (loc.kind === 'floor') this.lastFloorRotation.set(itemId, loc.rotation);
-    return { ok: true, from: loc };
-  }
-
-  /**
-   * Validate and perform a drop of the held item — the single entry point for
-   * slots and surfaces alike (CC-004). An invalid drop changes nothing: the
-   * item stays held and the view restores it.
-   */
-  drop(itemId: string, target: DropTarget): DropResult {
-    const item = this.itemById(itemId);
-    if (!item) return { ok: false, itemId, reason: 'unknown-item' };
-    if (this.location.get(itemId)?.kind !== 'held') {
-      return { ok: false, itemId, reason: 'not-held' };
-    }
-    if (target.type === 'slot') {
-      const slot = this.slotById(target.slotId);
-      if (!slot) return { ok: false, itemId, reason: 'unknown-slot' };
-      const zone = this.zoneOfSlot(target.slotId);
-      if (!zone || zone.category !== item.category) {
-        return { ok: false, itemId, reason: 'wrong-category' };
-      }
-      if (this.slotItem.get(target.slotId)) {
-        return { ok: false, itemId, reason: 'slot-occupied' };
-      }
-      this.slotItem.set(target.slotId, itemId);
-      this.location.set(itemId, { kind: 'slot', slotId: target.slotId });
-      this.heldId = null;
-      return this.commit(itemId, target);
-    }
-
-    // surface path — a floor drop commits as { surfaceId: 'floor' } and stores
-    // location kind 'floor' (C-21); furniture exclusion applies via validation
-    const check = this.validateSurfaceDrop(itemId, target.surfaceId, target.x, target.y);
-    if (!check.ok) return { ok: false, itemId, reason: check.reason };
-    const surface = this.surfaceById(target.surfaceId)!;
-    if (surface.kind === 'floor') {
-      const rotation = this.lastFloorRotation.get(itemId) ?? 0;
-      this.location.set(itemId, { kind: 'floor', x: target.x, y: target.y, rotation });
-    } else {
-      this.location.set(itemId, {
-        kind: 'surface', surfaceId: target.surfaceId, x: target.x, y: target.y, rotation: 0,
-      });
-    }
-    this.heldId = null;
-    return this.commit(itemId, { type: 'surface', surfaceId: target.surfaceId, x: target.x, y: target.y });
-  }
-
-  /** Build the committed result for a successful drop, including the collection
-   *  transition channel (CC-007/Q2: only incomplete→complete transitions are
-   *  reported; exact put-backs and cancel-restores never appear here). */
-  private commit(itemId: string, target: DropTarget): DropResult {
-    const collectionCompleted = this.refreshCollections();
-    const p = this.progress();
-    const base: DropResult = {
-      ok: true, itemId, target, placed: p.placed, total: p.total, completed: this.isComplete(),
+  stats(): RunStats {
+    return {
+      elapsedMs: Date.now() - this.startedAt,
+      mistakes: this.mistakes,
+      goldenFound: this.goldenFound,
+      bestStreak: this.bestStreak,
+      crittersFiled: this.filed,
+      jarsSealed: this.sealedCount,
+      jarsShelved: this.shelvedCount,
     };
-    return collectionCompleted.length ? { ...base, ok: true, collectionCompleted } as typeof base : base;
   }
 
-  /** Put a held item back on the floor (cancel / invalid release). Committed
-   *  restore path — routed through the same consumer as normal drops (C-17),
-   *  so collection statuses refresh here too (a restore can break a collection
-   *  only via the deterministic conflict fallback; it can never complete one). */
-  returnToFloor(itemId: string, x: number, y: number, rotation = 0): boolean {
-    if (this.location.get(itemId)?.kind !== 'held') return false;
-    this.location.set(itemId, { kind: 'floor', x, y, rotation });
-    if (this.heldId === itemId) this.heldId = null;
-    this.refreshCollections();
+  consumeEvents(): GameEvent[] {
+    const out = this.events;
+    this.events = [];
+    return out;
+  }
+
+  /** Pick up a loose critter into the hand (capacity from skills). */
+  pickCritter(id: string): boolean {
+    if (this.critterState[id] !== 'loose') return false;
+    if (this.held.kind === 'jar') return false;
+    if (this.held.kind === 'critters' && this.held.ids.length >= this.carryCap) return false;
+    this.critterState[id] = 'held';
+    this.held = this.held.kind === 'critters'
+      ? { kind: 'critters', ids: [...this.held.ids, id] }
+      : { kind: 'critters', ids: [id] };
     return true;
+  }
+
+  /** Pick up a sealed, loose jar (one per hand — it is glass, after all). */
+  pickJar(id: string): boolean {
+    if (this.jarState[id] !== 'loose') return false;
+    if (this.held.kind !== 'none') return false;
+    if (!this.isSealed(id)) {
+      const jar = this.world.jars.find((j) => j.id === id);
+      const missing = jar ? jar.capacity - this.jarFill[id] : 0;
+      this.emit({ t: 'hint', text: `This jar still needs ${missing} more critter${missing === 1 ? '' : 's'}.` });
+      return false;
+    }
+    this.jarState[id] = 'held';
+    this.held = { kind: 'jar', id };
+    return true;
+  }
+
+  /** Return whatever is held to where it came from (drop on nothing). */
+  releaseAll(): void {
+    if (this.held.kind === 'critters') {
+      for (const id of this.held.ids) this.critterState[id] = 'loose';
+      this.emit({ t: 'bounce', critterId: this.held.ids[0] });
+    } else if (this.held.kind === 'jar') {
+      this.jarState[this.held.id] = 'loose';
+      this.emit({ t: 'bounce', jarId: this.held.id });
+    }
+    this.held = { kind: 'none' };
+  }
+
+  /** File ONE held critter into `jarId`. Exact identity match required. */
+  fileCritter(critterId: string, jarId: string): boolean {
+    if (this.held.kind !== 'critters' || !this.held.ids.includes(critterId)) return false;
+    const critter = this.world.critters.find((c) => c.id === critterId);
+    if (!critter) return false;
+    if (critter.jarId !== jarId || this.jarState[jarId] === 'shelved' || this.jarState[jarId] === 'held') {
+      this.mistakes++;
+      this.streak = 0;
+      this.emit({ t: 'wrong', jarId });
+      return false;
+    }
+    const jar = this.world.jars.find((j) => j.id === jarId);
+    if (!jar || this.jarFill[jarId] >= jar.capacity) return false;
+
+    this.held = this.held.kind === 'critters' && this.held.ids.length > 1
+      ? { kind: 'critters', ids: this.held.ids.filter((i) => i !== critterId) }
+      : { kind: 'none' };
+    return this.applyFile(critter, jar);
+  }
+
+  /** The one true filing mutation — fill, streak, XP, seal. Callers have
+   *  already validated identity and jar state. NEVER touches the hand. */
+  private applyFile(critter: CritterDef, jar: JarDef): boolean {
+    const jarId = jar.id;
+    this.critterState[critter.id] = 'jarred';
+    this.jarFill[jarId]++;
+    this.filed++;
+    this.streak++;
+    this.bestStreak = Math.max(this.bestStreak, this.streak);
+    if (critter.golden) this.goldenFound++;
+    const fillIndex = this.jarFill[jarId];
+    this.emit({ t: 'filed', critterId: critter.id, jarId, fillIndex, golden: critter.golden });
+    if (this.streak > 0 && this.streak % STREAK_MILESTONE === 0) this.emit({ t: 'streak', n: this.streak });
+    this.addXp(XP_FILE + (critter.golden ? XP_GOLDEN_BONUS : 0));
+    if (fillIndex >= jar.capacity) {
+      this.sealedCount++;
+      this.emit({ t: 'sealed', jarId, species: jar.species });
+      this.addXp(XP_SEAL);
+    }
+    return true;
+  }
+
+  /** Shelve the held sealed jar into a cubby; cubby species must match. */
+  shelveJar(jarId: string, cubbyId: string): boolean {
+    if (this.held.kind !== 'jar' || this.held.id !== jarId) return false;
+    if (this.jarState[jarId] !== 'held' || !this.isSealed(jarId)) return false;
+    const jar = this.world.jars.find((j) => j.id === jarId);
+    const cubby = this.world.cubbies.find((c) => c.id === cubbyId);
+    if (!jar || !cubby || cubby.species !== jar.species) {
+      this.mistakes++;
+      this.streak = 0;
+      this.emit({ t: 'wrong', jarId });
+      return false;
+    }
+    this.jarState[jarId] = 'shelved';
+    this.jarCubby[jarId] = cubbyId;
+    this.held = { kind: 'none' };
+    this.shelvedCount++;
+    this.addXp(XP_SHELVE);
+    const speciesDone = this.world.jars.filter((j) => j.species === jar.species)
+      .every((j) => this.jarState[j.id] === 'shelved');
+    this.emit({ t: 'shelved', jarId, cubbyId, speciesDone });
+    if (this.shelvedCount % LORE_EVERY === 0 && this.loreIndex < LORE.length) {
+      this.emit({ t: 'lore', line: LORE[this.loreIndex++] });
+    }
+    if (this.world.jars.every((j) => this.jarState[j.id] === 'shelved')) {
+      this.addXp(XP_COMPLETE);
+      this.emit({ t: 'lore', line: LORE[LORE.length - 1] });
+      this.emit({ t: 'complete', stats: this.stats() });
+    }
+    return true;
+  }
+
+  /** Where should this loose critter fly (double-click)? Its jar, if the jar
+   *  is loose and still open. Null → nothing to do (jar shelved/full). */
+  flyTargetJar(critterId: string): string | null {
+    const c = this.world.critters.find((k) => k.id === critterId);
+    if (!c || this.critterState[critterId] !== 'loose') return null;
+    if (this.jarState[c.jarId] !== 'loose' || this.isSealed(c.jarId)) return null;
+    return c.jarId;
+  }
+
+  /** Where should this sealed jar fly? Its species cubby, if free. Works
+   *  both pre-pickup (loose) and while already held (the double-click flow). */
+  flyTargetCubby(jarId: string): string | null {
+    const st = this.jarState[jarId];
+    if ((st !== 'loose' && st !== 'held') || !this.isSealed(jarId)) return null;
+    const jar = this.world.jars.find((j) => j.id === jarId);
+    const cubby = this.world.cubbies.find((c) => c.species === jar?.species);
+    return cubby?.id ?? null;
+  }
+
+  /** Double-click flow: file a still-loose critter straight into its jar
+   *  (no pickup needed). Same rewards as the held path; never disturbs
+   *  whatever else is being carried — that was an orphaning bug once. */
+  flyFile(critterId: string): boolean {
+    const c = this.world.critters.find((k) => k.id === critterId);
+    if (!c || this.critterState[critterId] !== 'loose') return false;
+    if (this.jarState[c.jarId] !== 'loose' || this.isSealed(c.jarId)) return false;
+    const jar = this.world.jars.find((j) => j.id === c.jarId);
+    if (!jar || this.jarFill[jar.id] >= jar.capacity) return false;
+    return this.applyFile(c, jar);
+  }
+
+  /** Both Paws: file every held critter into its own jar, best-effort. */
+  fileAllHeld(): number {
+    if (this.held.kind !== 'critters') return 0;
+    let n = 0;
+    for (const id of [...this.held.ids]) {
+      const c = this.world.critters.find((k) => k.id === id);
+      if (c && this.jarState[c.jarId] === 'loose' && this.fileCritter(id, c.jarId)) n++;
+    }
+    return n;
+  }
+
+  /** Tide Pull active skill: auto-file up to `n` loose critters whose jar is
+   *  loose and open. Deterministic order (world order) keeps tests honest. */
+  tidePull(n = 3): number {
+    if (!this.skills.unlocked.has('tidePull')) return 0;
+    let done = 0;
+    for (const c of this.world.critters) {
+      if (done >= n) break;
+      if (this.critterState[c.id] !== 'loose') continue;
+      if (this.jarState[c.jarId] !== 'loose' || this.isSealed(c.jarId)) continue;
+      if (this.flyFile(c.id)) done++;
+    }
+    if (done > 0) this.emit({ t: 'hint', text: `The tide pulls ${done} critter${done === 1 ? '' : 's'} home.` });
+    return done;
+  }
+
+  isComplete(): boolean {
+    return this.world.jars.every((j) => this.jarState[j.id] === 'shelved');
   }
 }
