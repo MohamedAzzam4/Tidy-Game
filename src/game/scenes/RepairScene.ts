@@ -328,6 +328,7 @@ export class RepairScene extends Phaser.Scene {
             this.residue.fillStyle(0xcdbfa5, 0.5);
             this.residue.fillEllipse(spot.x, spot.y + 4, 46, 26);
             this.phase = 'wipe';
+            if (window.location.search.includes('autotest')) console.log('[sticker] phase -> wipe');
             this.instruction.setText('Now wipe the adhesive residue with the cloth — press and rub over the smudge.');
           }
         }
@@ -372,6 +373,7 @@ export class RepairScene extends Phaser.Scene {
           if (Math.hypot(p.x - spot.x, p.y - spot.y) < 30) {
             this.newSticker.setPosition(spot.x, spot.y).setAngle(-3);
             this.phase = 'press';
+            if (window.location.search.includes('autotest')) console.log('[sticker] phase -> press');
             this.instruction.setText('Press and hold for a moment to stick it down.');
           }
         }

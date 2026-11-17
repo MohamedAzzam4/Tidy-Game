@@ -47,6 +47,9 @@ export class GameScene extends Phaser.Scene {
 
   constructor() {
     super({ key: 'Game' });
+    if (typeof window !== 'undefined' && window.location.search.includes('autotest')) {
+      console.log(`[scene] GameScene constructed, storageOk=${this.storageOk}, ls=${typeof localStorage}`);
+    }
   }
 
   pendingSave: ReturnType<typeof loadRun> = null;
@@ -286,6 +289,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   save(): void {
+    if (window.location.search.includes('autotest')) {
+      console.log(`[save] called, storageOk=${this.storageOk}`);
+    }
     if (!this.storageOk) {
       if (!this.storageWarned) {
         this.storageWarned = true;

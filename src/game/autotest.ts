@@ -509,12 +509,15 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       pointerEvent(game, 'pointerup', b.sx, b.sy);
       await waitFrames(game, 3);
       assert(tidy().selection().length === 5, `5 selected (got ${tidy().selection().length})`);
-      // grab one of the selected => whole group held
-      const lead = three[0];
-      const leadGrab = w2s(lead.x, lead.y);
+      // grab one of the selected => whole group held (fresh position post-teleport)
+      const leadId = three[0].id;
+      const leadInfo = tidy().tapesInfo().find(t => t.id === leadId)!;
+      const leadGrab = w2s(leadInfo.x, leadInfo.y);
+      assert(tidy().selection().includes(leadId), 'lead is inside the selection');
       pointerEvent(game, 'pointerdown', leadGrab.sx, leadGrab.sy);
       await waitFrames(game, 3);
       assert(tidy().held().length === 5, `5 held together (got ${tidy().held().length})`);
+      assert(tidy().held().includes(leadId), 'the grabbed selected tape is the lead');
       // drop on combo C's rack (3 free)
       const rackC = { x: 640 + (combo % 8) * 420 + 78, y: 560 + Math.floor(combo / 8) * 250 + 46 };
       const dropPt = w2s(rackC.x, rackC.y);
