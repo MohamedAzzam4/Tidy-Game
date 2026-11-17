@@ -1,63 +1,68 @@
-# Tidy Tapes — Review note (analyze step, manual)
+# Tidy Tapes — Review note (analyze step, manual) — v2 follow-up
 
-**Feature:** 001-tidy-tapes · Reviewer: build agent · Date: 2026-11-17 (UTC+8)
+**Feature:** 001-tidy-tapes · Reviewer: build agent · Date: 2026-11-18 (UTC+8)
 
 ## Process honesty
 
-- Spec Kit CLI (`specify`) is **not installed** in this sandbox (`which specify` → empty).
-  The constitution/specify/plan/tasks/analyze steps were therefore followed **manually** in
-  `spec.md`, `plan.md`, `tasks.md` and this review note. **No slash command ran and none is
-  claimed to have run.**
-- All 9 external reference skill documents (Spec Kit README + quickstart, Ponytail SKILL.md,
-  Phaser-2D-game, create-game-assets, procedural-gen, game-feel, audio-design, game-playtest)
-  were fetched and their rules folded into the plan. One transient failure (ponytail 503)
-  succeeded on retry; `github.github.com/spec-kit/quickstart/` 404s (wrong domain) — the real
-  quickstart at `github.github.io/spec-kit/quickstart.html` was used.
-- Ponytail applied: no physics engine, no backend, no external assets/deps beyond pinned
-  Phaser; built-in Phaser features (camera, tweens, textures, scenes); smallest solution per
-  acceptance criterion (synthesized audio instead of files, canvas texture families instead of
-  400 unique images, one repair overlay scene for three minigames).
+- Spec Kit CLI (`specify`) remains **not installed**; v2 spec/plan/tasks + this review are
+  manual (same as v1). No slash command ran; none claimed.
+- Reference skills: Spec Kit workflow applied manually; Ponytail applied to the v2 design
+  (see below); a visual pass runs against the attached reference image via the VLM skill;
+  regression pass uses agent-browser (installed). The sandbox skills `pdf`/`docx`/`charts`
+  etc. are irrelevant here; the fullstack-dev skill's agent-browser self-verification rule
+  is followed.
+- Reference image analyzed (VLM): axis-aligned cozy top-down, thin extruded front edges,
+  rim highlights, contact shadows, multi-row slotted trays, edge-on book-style spines,
+  icon-labeled rows, high clutter. v1 baseline screenshot confirmed the reported problems
+  (flat, tiny spread racks, empty middle).
 
-## Cross-check: spec ↔ plan ↔ tasks
+## Ponytail check — smallest working change per requirement
 
-Every P1–P3 story maps to tasks and to an acceptance check (table in plan.md). Specific
-contradictions found and resolved before implementation:
+- **No global projection matrix.** The reference is axis-aligned; baking the 2.5D into
+  sprites (extrusions, lips, shadows) achieves the look with zero coordinate-transform
+  risk and keeps v1's proven camera/drag math (identity ground mapping). The spec's "if a
+  shallow projection helps" clause is satisfied by choosing the identity + baked art path.
+- Rework, not rewrite: worldgen/validation/textures are regenerated (geometry genuinely
+  changed), but scenes/controllers/save/audio/repair keep their v1 structure and proven
+  event flows; no engine/backend/asset changes; no new dependencies.
 
-1. **Marquee vs camera pan gesture conflict** — resolved: left-drag on empty table pans the
-   camera *before* Marquee Pickup unlocks (so the gesture can never batch-pick early); after
-   unlock the same gesture becomes the marquee and panning stays available via keyboard,
-   wheel, right/middle-drag; touch uses an explicit Pan/Select mode toggle plus two-finger pan.
-   Spec (US6.4), plan (Marquee algorithm), tasks (T5.4) now all state this identically.
-2. **"Misplaced Finder" ambiguity** — spec now states: highlights loose tapes and wrong-slot
-   tapes; already-correct tapes are never highlighted. (Wrong-slot tapes cannot occur through
-   normal play since insertion only accepts matching racks — the highlighter still covers the
-   case for robustness.)
-3. **Repair entry points** — initially bench-only; spec now also allows double-click /
-   two-tap to open a repair in place (bench drop stays, for the cozy bench moment and for
-   touch parity).
-4. **Zoom added → extra drag-math requirement** — accepted: per-frame
-   `camera.getWorldPoint` makes drag zoom-safe by construction; autotest re-checks grab-point
-   at zoom 0.7 (plan acceptance table row updated).
-5. **"Enough slots" validation semantics** — defined as: per-combo demand (loose + held +
-   shelved) ≤ rack capacity (8); generation constructs demand ≤ 7, validator re-checks and a
-   200-seed sweep gates it.
-6. **Power expiry vs held bundle** — all three docs now state expiry/cooldown only affect the
-   power, never the held bundle.
-7. **Batch overflow** — single rule everywhere: insert compatible tapes up to free slots,
-   leftovers land visibly below the rack (or stay held); never destroyed, never duplicated.
-8. **Dev fixture** — `?fixture=tiny` small board allowed as internal development fixture only;
-   the default New Game always generates 410 (≥400) tapes in the same world (requester's rule).
+## Conflicting-input resolution (cross-checked spec ↔ plan ↔ tasks)
 
-No missing requirement was found after re-reading the requester's message against spec.md
-(400+ tapes, both-axes scrollable world, camera not webpage scrolling, seed handling,
-validation guarantees, grab-point rule, hover preview, edge-on storage, glide sound timing,
-stagger, invalid-drop safety, three specific repairs with exact gesture descriptions, six
-skills with exact semantics, 15 s/60 s power windows, save/restore scope, real counters,
-no fail state, screenshots, playtest reporting).
+1. **Wheel: v1 pans, v2 zooms.** Zoom wins (explicit v2 instruction); pan remains via
+   Space+drag, right/middle-drag, WASD, touch. Help text updated so no verb is lost.
+2. **"Matching rows" ambiguity** → resolved as: row = one labeled 8-slot row; each group's
+   two rows live in two different rack units in different banks; validity is row-label
+   equality (no per-tape assignment). Win, Slot Guide (both rows), and generator all use
+   the same rule. The "two identical racks" phrase maps to these two rows.
+3. **Hidden correctness vs defect refusal.** Misfiles must be silent; defective rewind/
+   sticker tapes still refuse with the damage hint (visible defect state, not a correctness
+   leak — the tape's own damage is public information). Paint defect becomes optional/
+   cosmetic so nothing blocks filing invisibly.
+4. **Chime policy conflicts in v1** (chime fired on power activation and repair finish) →
+   retargeted: power activation → no sound, repair finish → soft press blip, chime reserved
+   for verify + win only.
+5. **Tray vs Marquee cap.** Marquee group carry (v1, cap 5) and tray (5 slots) coexist:
+   marquee selection can be dropped onto the tray (loads what fits) or carried as a bundle;
+   tray batch drop inserts only what fits. A full tray never accepts more — single rule in
+   both DragController and tray code.
+6. **Win on "fully occupied"** — win requires zero loose tapes AND every seated tape's
+   group matching its row label; physical capacity is guaranteed (total ≤ 32×16 slots);
+   misfiles are always correctable by pull-out, so the board is always solvable.
+7. **Save migration** — v1 save is never silently migrated (combo model changed 64→32);
+   the player chooses "fresh bench, keep unlocked skills" or discard. Progress (skill
+   unlocks) is stored separately from layout state, satisfying "separate the new-layout
+   option from the player's old progress".
+8. **Coordinate drift** — one coordinate model only: logical ground = camera world space
+   (identity); all hit-testing (tapes, rows, tray-in-screen-space, marquee) converts
+   through `camera.getWorldPoint` and the tray's screen rect; grab-point rule unchanged
+   from v1 (proven by autotest through pan/zoom/resize).
+9. **Camera zoom-at-cursor with clamp** — implemented as zoom then scroll-correction so the
+   cursor world point stays fixed, then Phaser bounds clamp (edges win over cursor, per
+   "when not limited by the board edge").
 
 ## Verification plan reminder
 
-Tests must actually run (unit + in-page autotest + agent-browser E2E); failures fixed and
-retested before delivery. Honest reporting: simulated (synthetic DOM events) vs real-device
-checks will be separated in the final report; audio loudness cannot be *audibly* verified
-headless and will be reported as parameter-verified only.
+Unit sweep + in-page autotest + agent-browser E2E with screenshots must actually run;
+failures fixed and retested. Honest final report: simulated vs real-device checks
+separated; audio verified by parameters (headless cannot hear); VLM screenshot inspection
+is advisory.

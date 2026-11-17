@@ -1,88 +1,78 @@
-# Tidy Tapes — Tasks (tasks.md)
+# Tidy Tapes — Tasks (tasks.md) — v2 follow-up
 
-**Feature:** 001-tidy-tapes · Prerequisites: spec.md + plan.md · Implementation order fixed by
-the requester: world/camera → single-tape sorting → 400+ generation → repairs → marquee &
-skills → sound, saving, playtesting. Each checkpoint is committed and pushed to branch
-`tidy-tapes` immediately.
+**Feature:** 001-tidy-tapes · Prerequisites: spec.md v2 + plan.md v2. Order fixed by the
+requester: board/rack layout → angle, camera, pointer → storage, tray, skills → motion,
+sound, repair polish → prove & deliver. Every checkpoint is committed and pushed to branch
+`tidy-tapes` immediately (script `scripts/push_checkpoint.sh`).
 
-Legend: `[P]` parallelizable · [P1/P2/P3] user story priority · file paths are exact.
+## M8 — v2 planning (checkpoint: plan-v2)
 
-## M0 — Foundations (before gameplay code)
+- **T8.0** Baseline screenshot + file-ownership map (done: `download/baseline-v1-wide.png`,
+  list in spec.md). Update spec/plan/tasks/review for v2. Push.
 
-- **T0.1** [P1] Config + RNG + types: `src/game/config.ts`, `src/game/rng.ts`, `src/game/types.ts`
-  (8 colors × 8 symbols, world 4400×3000, thresholds 10/20/35/40/120/200, capacities; SplitMix64
-  + child seeds). Unit: `src/game/__tests__/rng.test.ts` (determinism, child-seed isolation).
-- **T0.2** [P1] Pure world generation + validation: `src/game/worldgen.ts`,
-  `src/game/validation.ts`. Unit: `src/game/__tests__/worldgen.test.ts` — 200-seed sweep:
-  determinism (gen twice, deep-equal), tapeCount ≥ 400, unique IDs, per-combo demand ≤
-  capacity, no inaccessible start (bounds/rack/bench overlap/coverage), defects ∈ 3 types.
-- **T0.3** [P] Save model: `src/game/save.ts` + `src/game/__tests__/save.test.ts`
-  (roundtrip, corrupted-input guards).
+## M9 — Board & rack layout (checkpoint: board-v2)
 
-## M1 — World & camera (checkpoint: world)
+- **T9.1** `config.ts`: SYMBOLS → 4 (star/heart/moon/bolt), GROUP_COUNT 32, ROWS_PER_GROUP
+  2, SLOTS_PER_ROW 8, unit/bank geometry (UNIT_W/H, ROW_H, SLOT pitch, label), WORLD
+  2800×1800, fill knobs (GROUP_FILL_MIN/MAX, TOTAL_MIN 405), ZOOM 0.6–2.0, POWER_* kept,
+  INSERT_* knobs (ALIGN/TURN/SLIDE ms, STAGGER_MS), SAVE_KEY v2, skill thresholds.
+- **T9.2** `types.ts` + `worldgen.ts`: RackUnit/Row model (rowId 0..63, row → unit+group),
+  tape count per group from combined capacity + top-up, center-inclusive scatter zones
+  (units/bench obstacles, clearance pads), clusters+singles, defect assignment (~11%,
+  rewind/sticker blocking, paint cosmetic). Unit: `__tests__/worldgen.test.ts` updated:
+  determinism, ≥400, demand ≤ 16 per group, group rows in different units, center density,
+  no inaccessible starts, defects valid.
+- **T9.3** `validation.ts`: same sweep + center-population + two-row-group checks; keep
+  grabbability/coverage checks. Unit: `__tests__` 200-seed sweep green.
+- **T9.4** `textures.ts`: unit body (extruded front/side faces, rim light, label strip,
+  slot channels, readable empty slots), per-unit lip overlay texture, v2 face (contact
+  shadow + edge darkening baked), v2 spine (18×30 bar, color + symbol stripe + cap), tray
+  chips, wood/props/bench refresh (angled, busier), stroke 'fx' dot.
+- **T9.5** GameScene visual build: banks from config, layered unit sprites + lips, labels,
+  occupancy text, props placement, initial camera.
+- **Check:** board renders, lint, unit tests green. Push.
 
-- **T1.1** [P1] Symbol drawing + texture families: `src/game/symbols.ts`,
-  `src/game/textures.ts`, `src/game/scenes/BootScene.ts` (tape faces 184×120 @0.5, spines,
-  racks, wood tile, bench mat, props, UI bits).
-- **T1.2** [P1] GameScene world + camera + panning: `src/game/scenes/GameScene.ts` —
-  tileSprite table, 64 racks with headers/counts, bounds camera, wheel+trackpad, keyboard
-  (WASD/arrows, works mid-drag), right/middle-drag pan, two-finger touch pan, zoom +/−.
-  Fixture: small-board debug flag `?fixture=tiny` for dev only (never the deliverable).
-- **T1.3** [P1] Fixed HUD: `src/game/scenes/UIScene.ts` — name, seed, real counters
-  (Shelved X/N, loose, repairs left), Pan/Select toggle, zoom buttons, help panel, toasts.
-- **T1.4** [P1] Mount: `src/components/GameMount.tsx`, `src/app/page.tsx` (client-only,
-  full viewport, destroy on unmount).
-- **Check:** run in browser, pan world, HUD fixed. Push checkpoint.
+## M10 — Angle, camera, pointer (checkpoint: camera-v2)
 
-## M2 — Single-tape sorting (checkpoint: sorting)
+- **T10.1** Wheel zoom cursor-centered (clamped to bounds), +/−/fit buttons, Space+drag
+  pan, pinch zoom+pan, keyboard kept; pan usable while holding (v1 rule preserved).
+- **T10.2** DragController: any-row hover preview (nearest free slot, same for every tape),
+  pull-out of seated tapes, drop routing v2 (any row w/ free slot; bench; table; tray).
+- **T10.3** Insert path with lip occlusion on ONE rack: align → turn → slide under lip →
+  seat + settle; prove with a focused screenshot (angle, drag alignment, occlusion, spine
+  visible), then roll out board-wide. Wide-board screenshot.
+- **Check:** autotest grab-point cases still pass (adapted). Push.
 
-- **T2.1** [P1] `src/game/controllers/DragController.ts` — grab offset + per-frame
-  `camera.getWorldPoint` recompute (pan/zoom/resize-safe), pickup pop (no lag), depth raise,
-  hover slot preview (matching rack only), drop routing (insert / invalid / bench).
-- **T2.2** [P1] Insert presentation: face→edge turn, slide tween, settle tick, slot
-  occupancy, counter updates, unlock milestones hooks, completion panel.
-- **Check:** drag a tape across racks mid-pan; insert; counters. Push checkpoint.
+## M11 — Storage, tray, skills, win (checkpoint: tray-skills-v2)
 
-## M3 — Full 400+ generation (checkpoint: 400)
+- **T11.1** Tray (UIScene + DragController): 5 slots, load/remove/drag-out, batch drop,
+  partial fit, full-refuse, collapse toggle, mini chips with color+symbol.
+- **T11.2** Marquee → group move + load into free tray slots (extras stay put, fit shown).
+- **T11.3** SkillsController v2: scanner, guide (dual-row + offscreen arrows), misfile
+  reveal as 15/60 power, matchScan 15/60, matchGather → tray (instant, 60 s cooldown);
+  timer HUD; unlock toasts; no pre-activation reveals.
+- **T11.4** Win logic: occupancy vs match; generic not-done message; verify affordance
+  (unit badge click → chime only when fully correct); completion panel.
+- **T11.5** Save v2 + v1 detection + choice panel (keep skills / discard); tray persisted.
+- **Check:** autotest tray/skills/win suites green. Push.
 
-- **T3.1** [P1] Wire `worldgen` into GameScene New Game (seeded; ?seed= replay; different seed
-  per New Game), pile scatter rendering with separation pass, real starting total in HUD.
-- **T3.2** [P1] `src/game/debug.ts` — window.__tidy API (counts, state, camera, seed helpers).
-- **Check:** 410 tapes live, autotest T1/T2 green. Push checkpoint.
+## M12 — Motion, sound, repair polish (checkpoint: feel-v2)
 
-## M4 — Repairs (checkpoint: repairs)
+- **T12.1** Insertion fx: motion strokes (one pair at a time), tuned timings, stagger;
+  Magnetic Tuck (shff + tuk-at-seat) with variation + batch peak control; remove chime
+  from power-activate/repair-finish; sound-check audition buttons in help panel.
+- **T12.2** RepairScene: keep flows; paint defect = optional cosmetic (fileable);
+  finish sound → soft press blip; text tweaks.
+- **T12.3** Help/controls text update (wheel zoom, Space-drag, tray, verify, misfiles).
+- **Check:** audio param asserts; autotest T5/T9. Push.
 
-- **T4.1** [P1] `src/game/scenes/RepairScene.ts` — overlay, big cassette, cancel; bench drop +
-  double-click entry; defective tapes refuse shelving with hint.
-- **T4.2** [P1] Rewind minigame (pencil circular strokes, ribbon transfer, threshold).
-- **T4.3** [P1] Sticker swap (peel drag-off, residue rub, same-symbol sticker place + press).
-- **T4.4** [P1] Paint touch-up (marker rub over faded patch, RenderTexture erase, coverage).
-- **Check:** all three repairs complete via simulated gestures; tape returns to sorting.
-  Push checkpoint.
+## M13 — Prove & deliver (checkpoint: final-v2)
 
-## M5 — Skills, marquee, powers (checkpoint: skills)
-
-- **T5.1** [P1] `src/game/controllers/SkillsController.ts` — milestones, toasts, chips state.
-- **T5.2** [P1] Defect Scanner + Misplaced Finder (toggles; never highlight correct).
-- **T5.3** [P1] Slot Guide (select tape → rack/slot highlight or edge arrow).
-- **T5.4** [P1] Marquee Pickup (cap 5; pre-unlock gesture = pan only; group carry; batch drop
-  with partial capacity + visible leftovers; touch Select mode).
-- **T5.5** [P1] Match Scan + Match Gather powers (15 s / 60 s, edge indicators, gather excludes
-  shelved & unrepaired, expiry preserves held).
-- **Check:** autotest T7/T8/T11 green. Push checkpoint.
-
-## M6 — Sound & saving (checkpoint: sound+save)
-
-- **T6.1** [P1] `src/game/audio.ts` — buses, limiter, variation, ducking; wire all events
-  (glide/tick/thud/pickup/repair/ unlock/completion). No sound on hover or invalid drop.
-- **T6.2** [P1] Save/restore: autosave, reload restore, New Game confirm, seed replay.
-- **Check:** autotest T5/T10 green. Push checkpoint.
-
-## M7 — Verification & delivery (checkpoint: final)
-
-- **T7.1** [P1] `src/game/autotest.ts` — full scripted suite (T1–T14 + touch sim) via real
-  DOM PointerEvents; results surfaced on page + read by agent-browser.
-- **T7.2** [P1] agent-browser E2E: boot, exercise verbs, screenshots (2 distant regions,
-  repair close-up, HUD), dev.log cross-check; fix and re-run until green.
-- **T7.3** [P] `bun run lint` clean; unit tests green; final push; delivery notes with
-  tested/not-tested honesty list.
+- **T13.1** `debug.ts` + `autotest.ts` v2 rewrite (full acceptance list incl. misfile
+  no-tell, pull-out, tray, timers, win-block, verify-chime, touch sim).
+- **T13.2** agent-browser E2E: fresh seed 400+, pan+zoom while holding, 5-batch into
+  partially filled row, misfile-accept → reveal → correct, full+misfiled no-win, tuck vs
+  chime policy, screenshots: wide board (center populated), close-up edge-on storage,
+  repair close-up. Fix and re-run until green.
+- **T13.3** `bun run lint` clean; unit tests green; README delivery notes (controls,
+  tape count, tested/not-tested); final push.
