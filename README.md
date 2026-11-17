@@ -8,6 +8,16 @@ you. The abyss is patient.
 deploys itself via GitHub Actions — `main` is untouched and still holds
 Cozy Corner).
 
+> **One-time deploy note.** The `github-pages` environment currently
+> whitelists only the `main` branch, so this branch's deploy workflow waits on
+> a 30-second manual ok: **Settings → Environments → github-pages →
+> Deployment branches and tags → add `tidekeeper`**, then re-run
+> ["Deploy tidekeeper to Pages"](https://github.com/MohamedAzzam4/Tidy-Game/actions/workflows/deploy-tidekeeper.yml).
+> (The push token used to create this branch can write contents but cannot
+> edit environment policies.) Alternatively switch **Settings → Pages →
+> Build and deployment → Source → Deploy from a branch → `tidekeeper` / root**.
+> Until then, run it anywhere with `python3 -m http.server` in this folder.
+
 ---
 
 ## Same mechanics, different ocean
