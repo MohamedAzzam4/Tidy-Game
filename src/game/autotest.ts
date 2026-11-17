@@ -353,11 +353,11 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       assert(tidy().held().includes(tape.id), `grabbed the intended tape (held=${tidy().held()})`);
       pointerEvent(game, 'pointermove', s0.sx + 130, s0.sy + 90);
       await waitFrames(game, 3);
-      let info = tidy().tapesInfo().find(t => t.id === tape.id)!;
+      const live = tidy().spritePos(tape.id)!;
       const cam = game.scene.getScene('Game')!.cameras.main;
       const wp = cam.getWorldPoint(s0.sx + 130, s0.sy + 90);
-      assert(approx(info.x, wp.x - grab.x, 0.75), `moved grab point: tape ${info.x.toFixed(1)} vs ${((wp.x - grab.x)).toFixed(1)}`);
-      assert(approx(info.y, wp.y - grab.y, 0.75), `moved grab point y`);
+      assert(approx(live.x, wp.x - grab.x, 0.75), `moved grab point: tape ${live.x.toFixed(1)} vs ${((wp.x - grab.x)).toFixed(1)}`);
+      assert(approx(live.y, wp.y - grab.y, 0.75), `moved grab point y`);
       // camera pans with the keyboard while the pointer is STATIONARY
       const scrollBefore = tidy().camera();
       keyEvent('keydown', 'ArrowRight', 'ArrowRight', 39);
@@ -366,10 +366,10 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       await waitFrames(game, 4);
       const after = tidy().camera();
       assert(after.x > scrollBefore.x + 40, `keyboard pan moved camera ${scrollBefore.x} -> ${after.x}`);
-      info = tidy().tapesInfo().find(t => t.id === tape.id)!;
+      const live2 = tidy().spritePos(tape.id)!;
       const wp2 = cam.getWorldPoint(s0.sx + 130, s0.sy + 90); // same SCREEN point, new camera
-      assert(approx(info.x, wp2.x - grab.x, 0.75), `held tape followed camera pan: ${info.x.toFixed(1)} vs ${(wp2.x - grab.x).toFixed(1)}`);
-      assert(approx(info.y, wp2.y - grab.y, 0.75), 'held tape y after pan');
+      assert(approx(live2.x, wp2.x - grab.x, 0.75), `held tape followed camera pan: ${live2.x.toFixed(1)} vs ${(wp2.x - grab.x).toFixed(1)}`);
+      assert(approx(live2.y, wp2.y - grab.y, 0.75), 'held tape y after pan');
       // release on empty table: dropped, not lost, not duplicated
       pointerEvent(game, 'pointerup', s0.sx + 130, s0.sy + 90);
       await waitFrames(game, 3);
@@ -390,11 +390,11 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       await waitFrames(game, 2);
       pointerEvent(game, 'pointermove', s0.sx - 60, s0.sy + 40);
       await waitFrames(game, 3);
-      const info = tidy().tapesInfo().find(t => t.id === tape.id)!;
+      const live = tidy().spritePos(tape.id)!;
       const cam = game.scene.getScene('Game')!.cameras.main;
       const wp = cam.getWorldPoint(s0.sx - 60, s0.sy + 40);
-      assert(approx(info.x, wp.x - grab.x, 1), `zoom drag x: ${info.x.toFixed(1)} vs ${(wp.x - grab.x).toFixed(1)}`);
-      assert(approx(info.y, wp.y - grab.y, 1), 'zoom drag y');
+      assert(approx(live.x, wp.x - grab.x, 1), `zoom drag x: ${live.x.toFixed(1)} vs ${(wp.x - grab.x).toFixed(1)}`);
+      assert(approx(live.y, wp.y - grab.y, 1), 'zoom drag y');
       pointerEvent(game, 'pointerup', s0.sx - 60, s0.sy + 40);
       await waitFrames(game, 2);
       d.setCamera(700, 430, 1);
@@ -433,6 +433,8 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       const tape = isolated;
       const rack = { x: 640 + (tape.combo % 8) * 420 + 78, y: 560 + Math.floor(tape.combo / 8) * 250 + 46 };
       const before = tidy().shelved();
+      d.setCamera((tape.x + rack.x) / 2, (tape.y + rack.y) / 2, 0.72);
+      await waitFrames(game, 3);
       await dragTape(game, tape.id, rack);
       await sleep(900);
       const info = tidy().tapesInfo().find(t => t.id === tape.id)!;
@@ -485,8 +487,11 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       const freeNow = 8 - 5;
       assert(freeNow === 3, `3 free slots (got ${freeNow})`);
       // cluster: 3 loose of C + 2 loose of another combo (teleport fixture)
-      const looseOther = info.filter(t => t.combo !== combo && t.state === 'loose' && !t.defect).slice(0, 2);
-      const three = looseC.slice(0, 3);
+      const info2 = tidy().tapesInfo();
+      const looseC2 = info2.filter(t => t.combo === combo && t.state === 'loose' && !t.defect);
+      const looseOther = info2.filter(t => t.combo !== combo && t.state === 'loose' && !t.defect).slice(0, 2);
+      const three = looseC2.slice(0, 3);
+      assert(three.length >= 3, `3 loose tapes of combo C remain (got ${three.length})`);
       const clusterBase = { x: 2600, y: 1650 };
       three.forEach((t, i) => tidy().setTapePos(t.id, clusterBase.x - 60 + i * 70, clusterBase.y - 40));
       looseOther.forEach((t, i) => tidy().setTapePos(t.id, clusterBase.x - 40 + i * 80, clusterBase.y + 50));
@@ -752,11 +757,11 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       await waitFrames(game, 2);
       pointerEvent(game, 'pointermove', s0.sx + 70, s0.sy - 40);
       await waitFrames(game, 3);
-      const info = tidy().tapesInfo().find(t => t.id === tape.id)!;
+      const live = tidy().spritePos(tape.id)!;
       const cam = game.scene.getScene('Game')!.cameras.main;
       const wp = cam.getWorldPoint(s0.sx + 70, s0.sy - 40);
-      assert(approx(info.x, wp.x - grab.x, 1), `post-resize drag x ${info.x.toFixed(1)} vs ${(wp.x - grab.x).toFixed(1)}`);
-      assert(approx(info.y, wp.y - grab.y, 1), 'post-resize drag y');
+      assert(approx(live.x, wp.x - grab.x, 1), `post-resize drag x ${live.x.toFixed(1)} vs ${(wp.x - grab.x).toFixed(1)}`);
+      assert(approx(live.y, wp.y - grab.y, 1), 'post-resize drag y');
       pointerEvent(game, 'pointerup', s0.sx + 70, s0.sy - 40);
       await waitFrames(game, 2);
       tidy().resize(1280, 720);

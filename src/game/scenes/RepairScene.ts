@@ -21,6 +21,10 @@ const PATCH_X = 18 * SCALE, PATCH_Y = 47 * SCALE;         // paint patch top-lef
 const PATCH_W = 24 * SCALE, PATCH_H = 14 * SCALE;
 
 export class RepairScene extends Phaser.Scene {
+  constructor() {
+    super({ key: 'Repair' });
+  }
+
   private tapeId = -1;
   private combo = 0;
   private kind: DefectType = 'rewind';

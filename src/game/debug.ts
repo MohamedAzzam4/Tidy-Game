@@ -43,6 +43,8 @@ export interface TidyDebug {
   resize(w: number, h: number): void;
   scanInfo(): { target: number | null; count: number };
   sceneInfo(): Record<string, { active: boolean; paused: boolean; sleeping: boolean }>;
+  spritePos(id: number): { x: number; y: number } | null;
+  storageOk(): boolean;
 }
 
 export function installDebug(game: Phaser.Game): void {
@@ -136,6 +138,12 @@ export function installDebug(game: Phaser.Game): void {
       }
       return out;
     },
+    spritePos: (id) => {
+      const s = getScene();
+      const v = s?.tapeViews.get(id);
+      return v ? { x: Math.round(v.container.x * 10) / 10, y: Math.round(v.container.y * 10) / 10 } : null;
+    },
+    storageOk: () => !!getScene()?.storageOk,
     audioRecent: () => getScene() ? audioRecentNames() : [],
     completed: () => getScene()?.completionShown ?? false,
     resize: (w, h) => getScene()?.resizeForTest(w, h),
