@@ -139,6 +139,9 @@ export class SkillsController {
     if (!this.unlocked.marquee) return; // gesture cannot batch-pick before unlock
     this.marqueeActive = true;
     this.marqueePointerId = pointerId;
+    if (window.location.search.includes('autotest')) {
+      console.log(`[marquee] begin at ${wp.x.toFixed(0)},${wp.y.toFixed(0)} ptr=${pointerId}`);
+    }
     this.marqueeStart = { ...wp };
     this.marqueeCurrent = { ...wp };
     this.marqueeGfx.setVisible(true);
@@ -167,6 +170,9 @@ export class SkillsController {
       if (t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1) enclosed.push(t);
     }
     enclosed.sort((a, b) => (a.x - cx) ** 2 + (a.y - cy) ** 2 - ((b.x - cx) ** 2 + (b.y - cy) ** 2));
+    if (window.location.search.includes('autotest')) {
+      console.log(`[marquee] end rect=(${x0.toFixed(0)},${y0.toFixed(0)})-(${x1.toFixed(0)},${y1.toFixed(0)}) enclosed=${enclosed.length}`);
+    }
     this.selection.clear();
     for (const t of enclosed.slice(0, MARQUEE_CAP)) this.selection.add(t.id);
     this.drawSelection();
@@ -367,6 +373,9 @@ export class SkillsController {
     }
     this.clearGuide();
     this.matchScanRingsGfx.clear();
+    if (window.location.search.includes('autotest')) {
+      console.log(`[repair] opening tape ${id}, Repair added=${this.scene.scene.settings.manager.keys?.includes?.('Repair') ?? 'n/a'}`);
+    }
     this.scene.scene.pause('Game');
     this.scene.scene.launch('Repair', { tapeId: id });
     this.scene.game.events.emit('repair:open');

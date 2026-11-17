@@ -51,6 +51,15 @@ async function waitUntil(cond: () => boolean, timeoutMs = 15000, what = 'conditi
 }
 
 // ---------------------------------------------------------------- event synth
+function pickIsolatedTape(minDist = 62): { id: number; combo: number; defect: string | null; state: string; x: number; y: number } {
+  const tapes = tidy().tapesInfo().filter(t => t.state === 'loose');
+  for (const t of tapes) {
+    const near = tapes.some(o => o.id !== t.id && Math.hypot(o.x - t.x, o.y - t.y) < minDist);
+    if (!near) return t;
+  }
+  return tapes[0];
+}
+
 function canvasEl(game: Phaser.Game): HTMLCanvasElement {
   return game.canvas;
 }
@@ -331,8 +340,7 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
 
   if (phase === 1) {
     await test('T3 drag: grab point stays under cursor incl. camera pan mid-drag (keyboard)', async () => {
-      const tapes = d.tapesInfo().filter(t => t.state === 'loose');
-      const tape = tapes[3];
+      const tape = pickIsolatedTape();
       d.setCamera(tape.x, tape.y, 1);
       await waitFrames(game, 3);
       // pointer down with an off-center grab offset, move, assert exact offset
@@ -342,6 +350,7 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       const before = tidy().camera();
       pointerEvent(game, 'pointerdown', s0.sx, s0.sy);
       await waitFrames(game, 3);
+      assert(tidy().held().includes(tape.id), `grabbed the intended tape (held=${tidy().held()})`);
       pointerEvent(game, 'pointermove', s0.sx + 130, s0.sy + 90);
       await waitFrames(game, 3);
       let info = tidy().tapesInfo().find(t => t.id === tape.id)!;
@@ -371,8 +380,7 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
     });
 
     await test('T3b drag at second zoom level (0.7) keeps the grab point', async () => {
-      const tapes = d.tapesInfo().filter(t => t.state === 'loose');
-      const tape = tapes[9];
+      const tape = pickIsolatedTape();
       d.setCamera(tape.x, tape.y, 0.7);
       await waitFrames(game, 3);
       const grab = { x: -12, y: 6 };
@@ -395,8 +403,8 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
     await test('T4 invalid drop: no silent accept, no loss, no duplicate, no insertion sound', async () => {
       const before = tidy().tapeCount();
       const shelvedBefore = tidy().shelved();
+      const tape = pickIsolatedTape();
       const tapes = d.tapesInfo().filter(t => t.state === 'loose');
-      const tape = tapes[5];
       const other = tapes.find(t => t.combo !== tape.combo)!;
       const rackPos = { x: 640 + ((other.combo % 8) * 420) + 78, y: 560 + Math.floor(other.combo / 8) * 250 + 46 };
       await dragTape(game, tape.id, rackPos);
@@ -416,7 +424,13 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
 
     await test('T5 valid insert: snap+slide, sound scheduled, counters move', async () => {
       const tapes = tidy().tapesInfo().filter(t => t.state === 'loose' && !t.defect);
-      const tape = tapes[0];
+      const isolated = (() => {
+        for (const t of tapes) {
+          if (!tapes.some(o => o.id !== t.id && Math.hypot(o.x - t.x, o.y - t.y) < 62)) return t;
+        }
+        return tapes[0];
+      })();
+      const tape = isolated;
       const rack = { x: 640 + (tape.combo % 8) * 420 + 78, y: 560 + Math.floor(tape.combo / 8) * 250 + 46 };
       const before = tidy().shelved();
       await dragTape(game, tape.id, rack);
@@ -447,10 +461,10 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       pointerEvent(game, 'pointerup', p0.sx + 180, p0.sy + 132);
       await waitFrames(game, 3);
       assert(tidy().selection().length === 0, 'no batch pickup possible before unlock');
-      assert(tidy().held().length === 0, 'nothing held');
-      const after = tidy().camera();
-      void after; void scrollBefore; // pan path asserted by camera change OR not needed
-      assert(true, 'gesture completed without selecting');
+      await waitFrames(game, 2);
+      pointerEvent(game, 'pointerup', p0.sx + 200, p0.sy + 150);
+      await waitFrames(game, 2);
+      assert(tidy().selection().length === 0, 'still no selection after release');
     });
   }
 
@@ -728,8 +742,7 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
     await test('T13 resize: drag math holds after viewport change', async () => {
       tidy().resize(900, 560);
       await waitFrames(game, 4);
-      const tapes = tidy().tapesInfo().filter(t => t.state === 'loose');
-      const tape = tapes[7];
+      const tape = pickIsolatedTape();
       tidy().setCamera(tape.x, tape.y, 1);
       await waitFrames(game, 3);
       const grab = { x: 8, y: 8 };

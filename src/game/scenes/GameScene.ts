@@ -293,8 +293,13 @@ export class GameScene extends Phaser.Scene {
       }
       return;
     }
-    const file = serializeRun(this.world, this.skills.unlocked, this.skills.powersSave(), this.playSeconds);
-    saveRun(file);
+    try {
+      const file = serializeRun(this.world, this.skills.unlocked, this.skills.powersSave(), this.playSeconds);
+      const ok = saveRun(file);
+      if (!ok && window.location.search.includes('autotest')) console.warn('[save] saveRun returned false');
+    } catch (e) {
+      if (window.location.search.includes('autotest')) console.warn('[save] serialize threw', e);
+    }
     this.game.events.emit('save:flash');
   }
 

@@ -158,6 +158,9 @@ export class DragController {
     };
     audio.play('pickup');
     this.skills.onGrabSelection(lead.id);
+    if (window.location.search.includes('autotest')) {
+      console.log(`[drag] grabbed tape ${lead.id} group=${group.map(v => v.id).join(',')}`);
+    }
   }
 
   /** Match Gather: hold a bundle gathered by the power (compact stack, capped). */
