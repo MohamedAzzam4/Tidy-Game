@@ -39,10 +39,13 @@ export const TAPE_H = 60;
 export const SPINE_W = 14;
 export const SPINE_H = 60;
 
-// Default run size: 384 base + 22..30 extras => 406..414 tapes (>= 400 always).
-export const TAPE_BASE_PER_COMBO = 6;
-export const TAPE_EXTRAS_MIN = 22;
-export const TAPE_EXTRAS_MAX = 30;
+// Default run size: 64 combos x 8 tapes = 512 (>= 400 always). Rack capacity is
+// exactly 8, so every group fits its rack precisely — including the acceptance
+// scenario "a row with only three free slots" (shelve 5 of a combo => 3 free,
+// 3 loose of that combo remain to be carried as a batch).
+export const TAPE_BASE_PER_COMBO = 8;
+export const TAPE_EXTRAS_MIN = 0;
+export const TAPE_EXTRAS_MAX = 0;
 
 export const DEFECT_RATE = 0.11;
 

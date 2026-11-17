@@ -26,7 +26,7 @@ describe('world generation + validation (seed sweep)', () => {
         throw new Error(`seed ${seed} invalid: ${v.issues.slice(0, 5).join('; ')}`);
       }
       expect(w.totalTapes).toBeGreaterThanOrEqual(400);
-      expect(w.totalTapes).toBeLessThanOrEqual(414);
+      expect(w.totalTapes).toBeLessThanOrEqual(518);
       expect(new Set(w.tapes.map(t => t.id)).size).toBe(w.tapes.length);
       expect(w.racks.length).toBe(COMBO_COUNT);
     }
