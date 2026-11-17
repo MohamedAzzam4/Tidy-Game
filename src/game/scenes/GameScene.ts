@@ -435,6 +435,22 @@ export class GameScene extends Phaser.Scene {
     return shelved;
   }
 
+  /** debug/test-only: complete every pending repair without gestures
+   *  (the real gesture paths are proven by the autotest repair suite). */
+  debugRepairAll(): number {
+    let n = 0;
+    for (const t of this.world.tapes) {
+      if (t.defect && !t.repaired) {
+        t.repaired = true;
+        const view = this.tapeViews.get(t.id);
+        if (view && view.overlay) view.overlay.setVisible(false);
+        n++;
+      }
+    }
+    this.emitCounters();
+    return n;
+  }
+
   /** debug/test-only: teleport a loose tape (fixture setup for marquee tests). */
   debugSetTapePos(id: number, x: number, y: number): void {
     const t = this.world.tapes.find(tt => tt.id === id);

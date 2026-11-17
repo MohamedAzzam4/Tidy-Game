@@ -26,6 +26,7 @@ export default function GameMount() {
         type: Phaser.AUTO,
         parent: hostRef.current,
         backgroundColor: '#3a2314',
+        input: { touch: true }, // headless browsers report no touch device; the game supports touch anyway
         scale: {
           mode: Phaser.Scale.RESIZE,
           width: '100%',

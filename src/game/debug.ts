@@ -33,6 +33,7 @@ export interface TidyDebug {
   shelve(count: number, combo?: number): number;
   setTapePos(id: number, x: number, y: number): void;
   openRepair(tapeId: number): void;
+  repairAll(): number;
   repairOpen(): boolean;
   activatePower(name: 'matchScan' | 'matchGather'): boolean;
   forceExpirePower(name: 'matchScan' | 'matchGather'): void;
@@ -117,6 +118,7 @@ export function installDebug(game: Phaser.Game): void {
       const t = s.world.tapes.find(x => x.id === tapeId);
       if (t && t.defect && !t.repaired) s.skills.openRepair(tapeId);
     },
+    repairAll: () => getScene()?.debugRepairAll() ?? -1,
     repairOpen: () => !!game.scene.getScene('Repair')?.scene.isActive(),
     activatePower: (name) => getScene()?.skills.tryActivatePower(name) ?? false,
     forceExpirePower: (name) => getScene()?.skills.forceExpire(name),
