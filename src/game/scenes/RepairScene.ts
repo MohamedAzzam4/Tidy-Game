@@ -502,6 +502,11 @@ export class RepairScene extends Phaser.Scene {
   }
 
   update(): void {
+    // sticker press-and-hold needs per-frame evaluation (a pure hold
+    // produces no pointer events)
+    if (this.kind === 'sticker' && this.phase === 'press' && !this.done) {
+      this.updateSticker(this.input.activePointer);
+    }
     // live state probe for the test harness (autotest pages only)
     if (window.location.search.includes('autotest')) {
       (window as unknown as { __repair?: unknown }).__repair = {
