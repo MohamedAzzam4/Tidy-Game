@@ -1,12 +1,19 @@
 /**
- * Tidy Tapes — synthesized audio engine (WebAudio; no files).
- * Buses: master <- sfx (+ limiter). Variation on repeats (pitch/gain offsets),
- * polyphony cap, per-batch ducking so staggered insertions never pile into one
- * loud hit. Autoplay-safe: resumes on the first user gesture.
+ * Tidy Tapes — synthesized audio engine v2 (WebAudio; no files).
+ *
+ * Magnetic Tuck (every accepted insertion): a soft descending "shff" that starts
+ * as the tape begins to enter, and a short muted plastic "tuk" exactly when it
+ * seats — calm, slightly game-like, never a loud click. Subtle variation,
+ * polyphony cap, and per-batch ducking so staggered insertions never pile into
+ * one loud hit.
+ *
+ * Tiny Chime is reserved for explicit confirmations ONLY (a rack the player
+ * verifies, or the verified end-of-job milestone). It is never played for a
+ * correct insertion, a filled rack, a power activation or a repair finish.
  */
 
 type SfxName =
-  | 'pickup' | 'glide' | 'tick' | 'thud' | 'invalid'
+  | 'pickup' | 'tuck' | 'tuk' | 'thud' | 'invalid'
   | 'unlock' | 'complete' | 'peel' | 'rub-tick' | 'press'
   | 'squeak' | 'wipe' | 'chime' | 'place' | 'gather';
 
@@ -16,7 +23,7 @@ class AudioEngine {
   private sfx: GainNode | null = null;
   private noiseBuf: AudioBuffer | null = null;
   private lastPlay: Partial<Record<SfxName, number>> = {};
-  private recentGlides: number[] = [];
+  private recentTucks: number[] = [];
   recent: { name: string; at: number }[] = []; // test introspection
   enabled = true;
 
@@ -111,12 +118,13 @@ class AudioEngine {
     osc.start(t); osc.stop(t + opts.dur + 0.05);
   }
 
-  /** ducking factor for staggered batch insertions */
-  private glideDuck(): number {
+  /** ducking factor: controls overlapping peaks on a batch of five tucks */
+  private tuckDuck(): number {
     const t = this.now();
-    this.recentGlides = this.recentGlides.filter(x => t - x < 0.4);
-    this.recentGlides.push(t);
-    return this.recentGlides.length > 3 ? 0.55 : 1;
+    this.recentTucks = this.recentTucks.filter(x => t - x < 0.45);
+    this.recentTucks.push(t);
+    const n = this.recentTucks.length;
+    return n > 3 ? 0.52 : n > 2 ? 0.75 : 1;
   }
 
   play(name: SfxName, opts: { delay?: number; gainScale?: number } = {}): void {
@@ -133,26 +141,27 @@ class AudioEngine {
     if (this.recent.length > 24) this.recent.shift();
 
     switch (name) {
-      case 'glide': {
-        // soft short plastic-on-plastic glide: filtered noise sweep, tapered
-        this.noise({ when, dur: 0.17, f0: 1250 * v.rate, f1: 430 * v.rate, gain: 0.34 * v.gain * gs * this.glideDuck(), q: 0.9 });
-        this.noise({ when: when + 0.02, dur: 0.1, f0: 2400 * v.rate, f1: 900, gain: 0.05 * v.gain * gs, q: 2 });
+      case 'tuck': {
+        // Magnetic Tuck, part 1: soft descending plastic shff (starts at entry)
+        this.noise({ when, dur: 0.22, f0: 1150 * v.rate, f1: 360 * v.rate, gain: 0.32 * v.gain * gs * this.tuckDuck(), q: 0.9 });
+        this.noise({ when: when + 0.02, dur: 0.1, f0: 2200 * v.rate, f1: 820, gain: 0.045 * v.gain * gs, q: 2 });
         break;
       }
-      case 'tick': { // tiny quiet seating tick
-        this.noise({ when, dur: 0.02, f0: 2600 * v.rate, gain: 0.05 * v.gain, q: 3 });
-        this.tone({ when, dur: 0.03, f0: 210 * v.rate, gain: 0.05 * v.gain, type: 'triangle' });
+      case 'tuk': {
+        // Magnetic Tuck, part 2: short muted plastic tuck exactly at the seat
+        this.noise({ when, dur: 0.02, f0: 2500 * v.rate, gain: 0.045 * v.gain, q: 3 });
+        this.tone({ when, dur: 0.032, f0: 200 * v.rate, f1: 150, gain: 0.045 * v.gain, type: 'triangle' });
         break;
       }
       case 'pickup': {
         this.noise({ when, dur: 0.035, f0: 1500 * v.rate, f1: 900, gain: 0.07 * v.gain, q: 2.4 });
         break;
       }
-      case 'place': { // leftover tapes fanned onto the table (very soft)
+      case 'place': { // tapes fanned onto the table / into the tray (very soft)
         this.noise({ when, dur: 0.05, f0: 700 * v.rate, f1: 400, gain: 0.055 * v.gain, q: 1.4 });
         break;
       }
-      case 'invalid': { // gentle low thud for a refused drop
+      case 'invalid': { // gentle low thud for a refused drop (tray full / needs repair)
         this.tone({ when, dur: 0.09, f0: 120 * v.rate, f1: 80, gain: 0.09 * v.gain, type: 'sine' });
         break;
       }
@@ -160,12 +169,12 @@ class AudioEngine {
         this.tone({ when, dur: 0.08, f0: 95, f1: 70, gain: 0.08 * v.gain });
         break;
       }
-      case 'unlock': {
+      case 'unlock': { // skill unlock toast (soft, distinct from the Tiny Chime)
         this.tone({ when, dur: 0.16, f0: 523.25, gain: 0.10 * v.gain, type: 'sine' });
         this.tone({ when: when + 0.11, dur: 0.2, f0: 783.99, gain: 0.09 * v.gain, type: 'sine' });
         break;
       }
-      case 'complete': {
+      case 'complete': { // verified end-of-job milestone (with the Tiny Chime)
         const notes = [392, 494, 587.3, 784];
         notes.forEach((f, i) => this.tone({ when: when + i * 0.14, dur: 0.3, f0: f, gain: 0.09 * v.gain, type: 'triangle' }));
         break;
@@ -184,20 +193,27 @@ class AudioEngine {
         this.noise({ when, dur: 0.09, f0: 900 * v.rate, f1: 1400, gain: 0.05 * v.gain, q: 0.8 });
         break;
       }
-      case 'press': { // pressing a new sticker
+      case 'press': { // pressing a new sticker / repair finish (soft blip, NOT the chime)
         this.tone({ when, dur: 0.06, f0: 170, f1: 120, gain: 0.08 * v.gain, type: 'sine' });
         this.noise({ when, dur: 0.02, f0: 1800, gain: 0.03, q: 3 });
         break;
       }
-      case 'gather': { // tapes flying into the held bundle
+      case 'gather': { // tapes flying into the tray
         this.tone({ when, dur: 0.12, f0: 620, f1: 900, gain: 0.06 * v.gain, type: 'sine' });
         break;
       }
-      case 'chime': {
+      case 'chime': { // Tiny Chime: explicit confirmations only (verify / win)
         this.tone({ when, dur: 0.22, f0: 659.25, gain: 0.08 * v.gain, type: 'sine' });
+        this.tone({ when: when + 0.06, dur: 0.18, f0: 987.77, gain: 0.04 * v.gain, type: 'sine' });
         break;
       }
     }
+  }
+
+  /** audition helpers for the in-game sound check */
+  auditionTuckBatch(): void {
+    for (let i = 0; i < 5; i++) this.play('tuck', { delay: i * 0.11 });
+    for (let i = 0; i < 5; i++) this.play('tuk', { delay: i * 0.11 + 0.24 });
   }
 }
 

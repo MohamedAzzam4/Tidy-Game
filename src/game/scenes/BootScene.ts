@@ -11,6 +11,10 @@ export class BootScene extends Phaser.Scene {
   create(): void {
     buildAllTextures(this);
     audio.unlock(); // best-effort; real unlock happens on first gesture
-    this.scene.start('Game');
+    // v1 bug fixed here: the HUD scene was never started, so the game shipped
+    // without its top bar, chips, tray or panels. Launch Game AND UI together.
+    this.scene.launch('Game');
+    this.scene.launch('UI');
+    this.scene.stop(); // boot has nothing left to render
   }
 }

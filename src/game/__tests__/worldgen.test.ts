@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { generateWorld } from '../worldgen';
 import { validateWorld } from '../validation';
-import { COMBO_COUNT, RACK_SLOTS } from '../config';
+import { CENTER, GROUPS, GROUP_CAPACITY, ROWS, rowsOfGroup, unitOfRow } from '../config';
 
-describe('world generation + validation (seed sweep)', () => {
+describe('world generation + validation v2 (seed sweep)', () => {
   it('is deterministic: same seed twice => identical worlds', () => {
     for (const seed of [1, 42, 777, 20260118, 0xffffffff]) {
       const a = generateWorld(seed);
@@ -26,20 +26,36 @@ describe('world generation + validation (seed sweep)', () => {
         throw new Error(`seed ${seed} invalid: ${v.issues.slice(0, 5).join('; ')}`);
       }
       expect(w.totalTapes).toBeGreaterThanOrEqual(400);
-      expect(w.totalTapes).toBeLessThanOrEqual(518);
+      expect(w.totalTapes).toBeLessThanOrEqual(GROUPS * GROUP_CAPACITY); // 512
       expect(new Set(w.tapes.map(t => t.id)).size).toBe(w.tapes.length);
-      expect(w.racks.length).toBe(COMBO_COUNT);
+      expect(w.rows.length).toBe(ROWS); // 64 labeled rows
     }
   }, 180_000);
 
-  it('every combo demand <= rack capacity (enough compatible slots)', () => {
+  it('group counts derive from combined row capacity; both rows in different units', () => {
     for (const seed of [3, 33, 333, 3333]) {
       const w = generateWorld(seed);
-      const demand = new Array(COMBO_COUNT).fill(0);
+      const demand = new Array(GROUPS).fill(0);
       for (const t of w.tapes) demand[t.combo] += 1;
-      for (let c = 0; c < COMBO_COUNT; c++) {
-        expect(demand[c]).toBeLessThanOrEqual(RACK_SLOTS);
+      for (let g = 0; g < GROUPS; g++) {
+        expect(demand[g]).toBeGreaterThanOrEqual(1);
+        expect(demand[g]).toBeLessThanOrEqual(GROUP_CAPACITY); // 16 = 2 rows x 8
+        const [a, b] = rowsOfGroup(g);
+        expect(unitOfRow(a)).not.toBe(unitOfRow(b)); // never both rows in one unit
+        expect(w.rows[a].group).toBe(g);
+        expect(w.rows[b].group).toBe(g);
       }
+    }
+  });
+
+  it('the center stays populated across seeds (no empty middle)', () => {
+    for (const seed of [1, 7, 13, 29, 101, 555, 909, 424242]) {
+      const w = generateWorld(seed);
+      const inCenter = w.tapes.filter(t =>
+        t.x >= CENTER.x && t.x <= CENTER.x + CENTER.w
+        && t.y >= CENTER.y && t.y <= CENTER.y + CENTER.h,
+      ).length;
+      expect(inCenter).toBeGreaterThanOrEqual(100);
     }
   });
 
@@ -54,7 +70,6 @@ describe('world generation + validation (seed sweep)', () => {
       for (const t of defective) expect(['rewind', 'sticker', 'paint']).toContain(t.defect);
       const types = new Set(defective.map(t => t.defect));
       expect(types.size).toBe(3);
-      // every defective tape is unrepaired and vice versa
       for (const t of w.tapes) {
         expect(t.repaired).toBe(t.defect === null);
       }

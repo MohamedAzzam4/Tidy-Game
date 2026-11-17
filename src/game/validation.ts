@@ -1,9 +1,14 @@
 /**
- * Tidy Tapes — world validation (pure; trust-boundary checks that gate every
+ * Tidy Tapes — world validation v2 (pure; trust-boundary checks that gate every
  * generated seed and also run inside autotest).
+ *
+ * v2 additions: two matching rows per group in different units, group counts
+ * derived from (and bounded by) combined row capacity, and a center-population
+ * check so the board never starts with an empty middle.
  */
 import {
-  COMBO_COUNT, RACK_SLOTS, TAPE_H, TAPE_W, WORLD_H, WORLD_W, benchRect, rackRect,
+  CENTER, CENTER_MIN_TAPES, GROUPS, GROUP_CAPACITY, ROWS, ROWS_PER_GROUP, SLOTS_PER_ROW,
+  TAPE_H, TAPE_W, UNITS, WORLD_H, WORLD_W, benchRect, rowsOfGroup, unitRect,
 } from './config';
 import type { DefectType, WorldData } from './types';
 
@@ -36,7 +41,7 @@ export function validateWorld(world: WorldData): ValidationResult {
   for (const t of tapes) {
     if (ids.has(t.id)) issues.push(`duplicate tape id ${t.id}`);
     ids.add(t.id);
-    if (t.combo < 0 || t.combo >= COMBO_COUNT) issues.push(`tape ${t.id} combo out of range`);
+    if (t.combo < 0 || t.combo >= GROUPS) issues.push(`tape ${t.id} group out of range`);
     if (t.defect !== null && !DEFECT_TYPES.includes(t.defect)) {
       issues.push(`tape ${t.id} unsolvable defect type ${t.defect}`);
     }
@@ -45,39 +50,37 @@ export function validateWorld(world: WorldData): ValidationResult {
   }
   if (ids.size !== tapes.length) issues.push(`non-unique ids (${ids.size}/${tapes.length})`);
 
-  // 2. rack coverage: one rack per combo, capacity correct
-  if (world.racks.length !== COMBO_COUNT) issues.push(`racks=${world.racks.length} != ${COMBO_COUNT}`);
-  const seenCombos = new Set<number>();
-  for (const rack of world.racks) {
-    if (seenCombos.has(rack.combo)) issues.push(`duplicate rack combo ${rack.combo}`);
-    seenCombos.add(rack.combo);
-    if (rack.slots.length !== RACK_SLOTS) issues.push(`rack ${rack.combo} slot count != ${RACK_SLOTS}`);
-    for (const s of rack.slots) if (s !== null && !ids.has(s)) issues.push(`rack ${rack.combo} references unknown tape ${s}`);
+  // 2. rows: 64 labeled rows, 4 per unit, one slot array each
+  if (world.rows.length !== ROWS) issues.push(`rows=${world.rows.length} != ${ROWS}`);
+  for (const row of world.rows) {
+    if (row.slots.length !== SLOTS_PER_ROW) issues.push(`row ${row.id} slot count != ${SLOTS_PER_ROW}`);
+    for (const s of row.slots) if (s !== null && !ids.has(s)) issues.push(`row ${row.id} references unknown tape ${s}`);
+    const expectedUnit = Math.floor(row.id / 4);
+    if (row.unit !== expectedUnit) issues.push(`row ${row.id} unit mismatch`);
   }
-  for (let c = 0; c < COMBO_COUNT; c++) {
-    if (!seenCombos.has(c)) issues.push(`no rack for combo ${c}`);
-  }
-
-  // 3. every tape has a reachable matching rack with enough slots for its whole group
-  const demand = new Array(COMBO_COUNT).fill(0);
+  // 3. every group has TWO matching rows in DIFFERENT units; demand ≤ capacity
+  const demand = new Array(GROUPS).fill(0);
   for (const t of tapes) demand[t.combo] += 1;
-  for (let c = 0; c < COMBO_COUNT; c++) {
-    const capacity = (world.racks.find(r => r.combo === c)?.slots.length ?? 0);
-    if (demand[c] > capacity) {
-      issues.push(`combo ${c}: demand ${demand[c]} > capacity ${capacity} (not enough compatible slots)`);
+  for (let g = 0; g < GROUPS; g++) {
+    const [a, b] = rowsOfGroup(g);
+    if (Math.floor(a / 4) === Math.floor(b / 4)) issues.push(`group ${g}: both rows in one unit`);
+    if (demand[g] > GROUP_CAPACITY) {
+      issues.push(`group ${g}: demand ${demand[g]} > capacity ${GROUP_CAPACITY}`);
     }
+    if (demand[g] < 1) issues.push(`group ${g}: no tapes generated`);
   }
+  if (demand.reduce((s, n) => s + n, 0) !== tapes.length) issues.push('demand does not balance');
 
-  // 4. no inaccessible start: in bounds, not inside racks/bench, not fully covered
+  // 4. no inaccessible start: in bounds, not inside units/bench, not fully covered
   const bench = benchRect();
   for (const t of tapes) {
     if (t.state !== 'loose') continue;
     if (t.x < 40 || t.x > WORLD_W - 40 || t.y < 40 || t.y > WORLD_H - 40) {
       issues.push(`tape ${t.id} starts out of bounds (${t.x.toFixed(0)},${t.y.toFixed(0)})`);
     }
-    for (const rack of world.racks) {
-      if (overlapsRect(t.x, t.y, rackRect(rack.combo), 2)) {
-        issues.push(`tape ${t.id} starts inside rack ${rack.combo}`);
+    for (let u = 0; u < UNITS; u++) {
+      if (overlapsRect(t.x, t.y, unitRect(u), 2)) {
+        issues.push(`tape ${t.id} starts inside unit ${u}`);
         break;
       }
     }
@@ -107,5 +110,37 @@ export function validateWorld(world: WorldData): ValidationResult {
     }
   });
 
+  // 5. center stays populated (no empty-middle boards, any seed)
+  const centerCount = tapes.filter(t =>
+    t.state === 'loose' && t.x >= CENTER.x && t.x <= CENTER.x + CENTER.w
+    && t.y >= CENTER.y && t.y <= CENTER.y + CENTER.h,
+  ).length;
+  if (centerCount < CENTER_MIN_TAPES) {
+    issues.push(`center populated too thinly (${centerCount} < ${CENTER_MIN_TAPES})`);
+  }
+
   return { ok: issues.length === 0, issues };
 }
+
+/** True when every seated tape's group matches its row label (win condition). */
+export function boardCorrect(world: WorldData): boolean {
+  for (const t of world.tapes) {
+    if (t.state !== 'shelved') continue;
+    const row = world.rows[t.row as number];
+    if (!row || row.group !== t.combo) return false;
+  }
+  return true;
+}
+
+/** Misfiled tapes (seated in a row whose label is a different group). */
+export function misfiledTapes(world: WorldData): number[] {
+  const out: number[] = [];
+  for (const t of world.tapes) {
+    if (t.state !== 'shelved') continue;
+    const row = world.rows[t.row as number];
+    if (!row || row.group !== t.combo) out.push(t.id);
+  }
+  return out;
+}
+
+export { ROWS_PER_GROUP };

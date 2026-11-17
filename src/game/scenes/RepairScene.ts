@@ -480,7 +480,7 @@ export class RepairScene extends Phaser.Scene {
     this.done = true;
     this.success = true;
     this.instruction.setText('There — good as new.');
-    audio.play('chime');
+    audio.play('press'); // soft blip — the Tiny Chime is reserved for verified results
     // restrained sparkle: three small dots
     const spot = this.kind === 'sticker' ? this.faceXY(21, 13.5)
       : this.kind === 'paint' ? { x: this.cx - FACE_W / 2 + PATCH_X + PATCH_W / 2, y: this.cy - FACE_H / 2 + PATCH_Y + PATCH_H / 2 }

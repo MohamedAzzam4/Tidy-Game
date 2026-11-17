@@ -1,6 +1,12 @@
 /**
  * Tidy Tapes — single source of constants (game feel numbers live here).
  * Pure data: no Phaser imports (unit-testable).
+ *
+ * v2 geometry: 8 shell colors × 4 clear symbols = 32 groups; every group has TWO
+ * matching rows (8 slots each) living in two DIFFERENT rack units in different
+ * banks — either row is equally valid for every tape of the group. 16 wooden
+ * rack units (4 rows each) sit in compact banks; the table center and the
+ * corridors stay densely scattered with loose tapes.
  */
 
 export const COLORS: { name: string; css: string; ink: string }[] = [
@@ -14,45 +20,110 @@ export const COLORS: { name: string; css: string; ink: string }[] = [
   { name: 'bubblegum', css: '#e38fb8', ink: '#4a3b23' },
 ];
 
-export const SYMBOLS: string[] = [
-  'star', 'heart', 'moon', 'sun', 'note', 'flower', 'bolt', 'rainbow',
-];
+/** 4 clear symbols per color (v2: no 8-shape variants just to inflate count). */
+export const SYMBOLS: string[] = ['star', 'heart', 'moon', 'bolt'];
 
-export const COMBO_COUNT = COLORS.length * SYMBOLS.length; // 64
+export const GROUPS = COLORS.length * SYMBOLS.length; // 32
+export const ROWS_PER_GROUP = 2;
+export const SLOTS_PER_ROW = 8;
+export const ROWS = GROUPS * ROWS_PER_GROUP; // 64 labeled rows
+export const ROWS_PER_UNIT = 4;
+export const UNITS = ROWS / ROWS_PER_UNIT; // 16 rack units
 
-export const WORLD_W = 4400;
-export const WORLD_H = 3000;
+export const WORLD_W = 2800;
+export const WORLD_H = 1800;
 
-// Racks: 8x8 grid, column = symbol, row = shell color.
-export const RACK_COLS = 8;
-export const RACK_ROWS = 8;
-export const RACK_GAP_X = 420;
-export const RACK_GAP_Y = 250;
-export const RACK_ORIGIN = { x: 640, y: 560 };
+// --- rack unit geometry (logical, top-face plane) ---
+export const UNIT_W = 240;
+export const UNIT_H = 184;          // label strip + 4 channels + south lip + front face
+export const CHIP_W = 28;           // row label chip (color + symbol) at row start
+export const SLOT_PITCH = 24;       // logical distance between slot centers
+export const SLOT0_X = 50;          // local x of slot 0 center
+export const ROW_CH_TOP = 30;       // local y of channel top for row 0
+export const ROW_CH_H = 30;         // channel height (spine 16x28 lives inside)
+export const ROW_PITCH = 36;        // vertical pitch between rows
+export const UNIT_FRONT_H = 8;      // baked extruded front face height
 
-export const RACK_W = 156;      // visual box incl. padding
-export const RACK_H = 92;       // slots area + header strip
-export const RACK_SLOTS = 8;    // capacity per (color, symbol) combo
+/** Local y center of the channel of local row `lr` (0..3). */
+export const rowLocalY = (lr: number): number => ROW_CH_TOP + lr * ROW_PITCH + ROW_CH_H / 2;
 
+// --- tape geometry ---
 export const TAPE_W = 92;
 export const TAPE_H = 60;
-export const SPINE_W = 14;
-export const SPINE_H = 60;
+export const SPINE_W = 16;
+export const SPINE_H = 28;
 
-// Default run size: 64 combos x 8 tapes = 512 (>= 400 always). Rack capacity is
-// exactly 8, so every group fits its rack precisely — including the acceptance
-// scenario "a row with only three free slots" (shelve 5 of a combo => 3 free,
-// 3 loose of that combo remain to be carried as a batch).
-export const TAPE_BASE_PER_COMBO = 8;
-export const TAPE_EXTRAS_MIN = 0;
-export const TAPE_EXTRAS_MAX = 0;
+// --- banks (deterministic, not seeded) ---
+// units 0..7  : back bank  (2 rows of 4)
+// units 8..11 : left bank  (1 column of 4)
+// units 12..15: right bank (1 column of 4)
+const BACK = { x0: 420, y0: 140, dx: 280, dy: 220 };
+const SIDE = { xL: 140, xR: 2420, y0: 620, dy: 220 };
 
+export function unitPos(u: number): { x: number; y: number } {
+  if (u < 8) {
+    const col = u % 4;
+    const bankRow = Math.floor(u / 4);
+    return { x: BACK.x0 + col * BACK.dx, y: BACK.y0 + bankRow * BACK.dy };
+  }
+  if (u < 12) {
+    return { x: SIDE.xL, y: SIDE.y0 + (u - 8) * SIDE.dy };
+  }
+  return { x: SIDE.xR, y: SIDE.y0 + (u - 12) * SIDE.dy };
+}
+
+/** rowId (0..63) → owning unit. Rows 4u..4u+3 belong to unit u. */
+export function unitOfRow(row: number): number { return Math.floor(row / ROWS_PER_UNIT); }
+
+/**
+ * rowId → group. Row r lives in unit u=floor(r/4); the 4 rows of a unit are four
+ * DIFFERENT groups (r % 32). Group g therefore owns rows g and g+32 — always in
+ * two different units, and (by the bank layout) in different banks. Either row
+ * is equally valid for every tape of the group; no per-tape assignment exists.
+ */
+export function groupOfRow(row: number): number { return row % GROUPS; }
+
+/** The two row ids that accept group `g`. */
+export function rowsOfGroup(g: number): number[] { return [g % ROWS, (g + GROUPS) % ROWS]; }
+
+export function rowRect(row: number): { x: number; y: number; w: number; h: number } {
+  const u = unitOfRow(row);
+  const p = unitPos(u);
+  const lr = row % ROWS_PER_UNIT;
+  return { x: p.x + 6, y: p.y + ROW_CH_TOP + lr * ROW_PITCH - 4, w: UNIT_W - 12, h: ROW_CH_H + 8 };
+}
+
+export function unitRect(u: number): { x: number; y: number; w: number; h: number } {
+  const p = unitPos(u);
+  return { x: p.x, y: p.y, w: UNIT_W, h: UNIT_H };
+}
+
+/** World-space center of slot `k` (0..7) in row `row`. */
+export function slotPos(row: number, k: number): { x: number; y: number } {
+  const u = unitOfRow(row);
+  const p = unitPos(u);
+  const lr = row % ROWS_PER_UNIT;
+  return { x: p.x + SLOT0_X + k * SLOT_PITCH, y: p.y + rowLocalY(lr) };
+}
+
+// --- board population (derived from combined row capacity) ---
+export const GROUP_CAPACITY = ROWS_PER_GROUP * SLOTS_PER_ROW; // 16
+export const GROUP_FILL_MIN = 0.7;   // seeded fill fraction per group
+export const GROUP_FILL_MAX = 1.0;
+export const TOTAL_MIN = 405;       // top-up until the board holds at least this many
 export const DEFECT_RATE = 0.11;
 
-// Repair bench mat zone (world rect).
-export const BENCH = { x: 150, y: 1150, w: 380, h: 700 };
+/** Center region that must stay populated across seeds (validation checks it). */
+export const CENTER = { x: 700, y: 620, w: 1400, h: 900 };
+export const CENTER_MIN_TAPES = 60;
 
-// Skill unlock milestones (shelved count) — all < 406 so all obtainable in one run.
+// --- repair bench (world rect, front-left) ---
+export const BENCH = { x: 140, y: 1560, w: 360, h: 200 };
+export function benchRect(): { x: number; y: number; w: number; h: number } {
+  return { x: BENCH.x, y: BENCH.y, w: BENCH.w, h: BENCH.h };
+}
+
+// --- skills & powers ---
 export const SKILL_THRESHOLDS = {
   scanner: 10,
   guide: 20,
@@ -65,42 +136,31 @@ export const SKILL_THRESHOLDS = {
 export const POWER_ACTIVE_MS = 15_000;
 export const POWER_COOLDOWN_MS = 60_000;
 export const MARQUEE_CAP = 5;
-export const GATHER_CAP = 9; // total held bundle cap for Match Gather
+export const TRAY_SLOTS = 5;
 
-export const SAVE_KEY = 'tidy-tapes-save-v1';
+// --- insertion feel knobs (tune by feel) ---
+export const INSERT_ALIGN_MS = 90;
+export const INSERT_TURN_MS = 110;
+export const INSERT_SLIDE_MS = 140;
+export const INSERT_STAGGER_MS = 110;
 
-export const ZOOM_MIN = 0.55;
-export const ZOOM_MAX = 1.6;
+// --- camera ---
+export const ZOOM_MIN = 0.6;
+export const ZOOM_MAX = 2.0;
 
-/** combo index helpers — combo = colorIdx * 8 + symbolIdx */
+// --- carry tray (screen-fixed, bottom-right; same rect in Game & UI scenes) ---
+export const TRAY = { w: 304, h: 88, margin: 14 };
+export function trayScreenRect(scaleW: number, scaleH: number): { x: number; y: number; w: number; h: number } {
+  return { x: scaleW - TRAY.margin - TRAY.w, y: scaleH - TRAY.margin - TRAY.h, w: TRAY.w, h: TRAY.h };
+}
+
+// --- misc ---
+export const SAVE_KEY = 'tidy-tapes-save-v2';
+export const SAVE_KEY_V1 = 'tidy-tapes-save-v1';
+
+/** group helpers — group = colorIdx * 4 + symbolIdx */
 export function colorIdxOf(combo: number): number { return Math.floor(combo / SYMBOLS.length); }
 export function symbolIdxOf(combo: number): number { return combo % SYMBOLS.length; }
 export function comboOf(colorIdx: number, symbolIdx: number): number {
   return colorIdx * SYMBOLS.length + symbolIdx;
-}
-
-/** Rack top-left world position for a combo. */
-export function rackPos(combo: number): { x: number; y: number } {
-  return {
-    x: RACK_ORIGIN.x + symbolIdxOf(combo) * RACK_GAP_X,
-    y: RACK_ORIGIN.y + colorIdxOf(combo) * RACK_GAP_Y,
-  };
-}
-
-/** World-space center of slot `slot` (0 = leftmost) for a combo's rack. */
-export function slotPos(combo: number, slot: number): { x: number; y: number } {
-  const r = rackPos(combo);
-  const pitch = (RACK_W - 16) / RACK_SLOTS;
-  const innerX = r.x + 8 + slot * pitch + pitch / 2;
-  const slotY = r.y + 22 + 6 + SPINE_H / 2;
-  return { x: innerX, y: slotY };
-}
-
-export function rackRect(combo: number): { x: number; y: number; w: number; h: number } {
-  const p = rackPos(combo);
-  return { x: p.x, y: p.y, w: RACK_W, h: RACK_H };
-}
-
-export function benchRect(): { x: number; y: number; w: number; h: number } {
-  return { x: BENCH.x, y: BENCH.y, w: BENCH.w, h: BENCH.h };
 }

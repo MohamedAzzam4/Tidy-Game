@@ -1,35 +1,46 @@
 /**
- * Tidy Tapes — deterministic world generation (pure; no Phaser).
- * Streams: layout (pile centers) / scatter (positions) / defects — forked so changes
- * in one stream never reshuffle another. Every placement loop is capped.
+ * Tidy Tapes — deterministic world generation v2 (pure; no Phaser).
+ * Streams: counts / layout (pile centers) / scatter (positions) / defects — forked
+ * so changes in one stream never reshuffle another. Every placement loop is capped.
+ *
+ * Groups: 32 (8 colors × 4 symbols). Each group's tape count derives from the
+ * combined capacity of its two matching rows (16 slots) via a seeded fill
+ * fraction, then a top-up pass guarantees ≥ TOTAL_MIN tapes overall. The two
+ * rows of a group live in different units/banks; neither row is preferred.
  */
 import { Rng } from './rng';
 import {
-  BENCH, COMBO_COUNT, DEFECT_RATE, RACK_COLS, RACK_GAP_X, RACK_GAP_Y, RACK_ORIGIN,
-  RACK_ROWS, RACK_SLOTS, RACK_W, TAPE_BASE_PER_COMBO, TAPE_EXTRAS_MAX, TAPE_EXTRAS_MIN,
-  TAPE_H, TAPE_W, WORLD_H, WORLD_W, rackPos, rackRect, benchRect,
+  CENTER, CENTER_MIN_TAPES, DEFECT_RATE, GROUPS, GROUP_CAPACITY,
+  GROUP_FILL_MAX, GROUP_FILL_MIN, ROWS, ROWS_PER_GROUP, SLOTS_PER_ROW, TOTAL_MIN,
+  UNIT_H, UNIT_W, UNITS, WORLD_H, WORLD_W, groupOfRow, rowsOfGroup, unitRect, benchRect,
 } from './config';
-import type { DefectType, Rack, Tape, WorldData } from './types';
+import type { DefectType, Row, Tape, WorldData } from './types';
 
 const DEFECT_TYPES: DefectType[] = ['rewind', 'sticker', 'paint'];
 
-interface Zone { x0: number; y0: number; x1: number; y1: number; }
+interface Zone { x0: number; y0: number; x1: number; y1: number }
 
-/** Fixed scatter zones (margins around the rack grid; corridors are too narrow
- *  once rack padding is respected). */
+/**
+ * Scatter zones cover ALL usable regions — the center first, then the corridors
+ * beside racks and the front band. Pile centers are placed on a jittered GRID
+ * over each zone (even coverage; the middle can never go empty), and ~28% of
+ * tapes are strays scattered individually. Obstacle rects (banks/bench) are
+ * excluded by the placement passes below, so zones may not intersect them.
+ */
 function scatterZones(): Zone[] {
-  const zones: Zone[] = [];
-  // top & bottom margins (clear of rack grid: y 560..2404, pad 46)
-  zones.push({ x0: 400, y0: 160, x1: 4000, y1: 470 });
-  zones.push({ x0: 400, y0: 2470, x1: 4000, y1: 2880 });
-  // left margin split around the bench zone; right margin
-  zones.push({ x0: 120, y0: 560, x1: 540, y1: 1100 });
-  zones.push({ x0: 120, y0: 1900, x1: 540, y1: 2400 });
-  zones.push({ x0: 3860, y0: 560, x1: 4280, y1: 2400 });
-  return zones;
+  return [
+    // center band (emphasis: most cells)
+    { x0: 560, y0: 560, x1: 2380, y1: 1490 },
+    // corridor between left bank and the center
+    { x0: 396, y0: 620, x1: 552, y1: 1480 },
+    // front band (below the center, above the bottom edge; bench sits left)
+    { x0: 560, y0: 1500, x1: 2680, y1: 1730 },
+    // strip right of the right bank
+    { x0: 2668, y0: 620, x1: 2740, y1: 1460 },
+    // NOTE: no top-margin zone — tapes clamped to the world's y=90 floor there
+    // get trapped in the back bank's clearance pad (deadlock found in seed 169).
+  ];
 }
-
-const PILES_PER_ZONE = [4, 4, 2, 2, 3]; // must match scatterZones() order
 
 function inRect(x: number, y: number, r: { x: number; y: number; w: number; h: number }, pad = 0): boolean {
   return x >= r.x - pad && x <= r.x + r.w + pad && y >= r.y - pad && y <= r.y + r.h + pad;
@@ -48,41 +59,65 @@ function pushOutOfRect(
   const dt = p.y - (r.y - pad);
   const db = (r.y + r.h + pad) - p.y;
   const m = Math.min(dl, dr, dt, db);
-  if (db === m) return { x: p.x, y: r.y + r.h + pad + 14 };           // below (preferred)
-  if (dt === m) return { x: p.x, y: r.y - pad - 14 };                  // above
-  if (dl === m) return { x: r.x - pad - 14, y: p.y };                  // left
-  return { x: r.x + r.w + pad + 14, y: p.y };                          // right
+  if (db === m) return { x: p.x, y: r.y + r.h + pad + 14 };
+  if (dt === m) return { x: p.x, y: r.y - pad - 14 };
+  if (dl === m) return { x: r.x - pad - 14, y: p.y };
+  return { x: r.x + r.w + pad + 14, y: p.y };
 }
 
 export function generateWorld(seed: number): WorldData {
   const rng = new Rng(seed);
+  const counts = rng.fork('counts');
   const layout = rng.fork('layout');
   const scatter = rng.fork('scatter');
   const defectRng = rng.fork('defects');
 
-  // --- combo demand: base 6 per combo + extras spread on distinct combos ---
-  const extras = TAPE_EXTRAS_MIN + layout.int(TAPE_EXTRAS_MAX - TAPE_EXTRAS_MIN + 1);
-  const total = COMBO_COUNT * TAPE_BASE_PER_COMBO + extras; // 406..414
-  const counts = new Array(COMBO_COUNT).fill(TAPE_BASE_PER_COMBO);
-  const idx = layout.shuffle([...Array(COMBO_COUNT).keys()]);
-  for (let i = 0; i < extras; i++) counts[idx[i]] += 1; // max 7 <= capacity 8
+  // --- rows (fixed geometry, labeled; rows 4u..4u+3 belong to unit u) ---
+  const rows: Row[] = [];
+  for (let r = 0; r < ROWS; r++) {
+    rows.push({
+      id: r,
+      group: groupOfRow(r),
+      unit: Math.floor(r / 4),
+      slots: new Array(SLOTS_PER_ROW).fill(null),
+    });
+  }
+  // sanity: every group's two rows live in different units
+  for (let g = 0; g < GROUPS; g++) {
+    const [a, b] = rowsOfGroup(g);
+    if (Math.floor(a / 4) === Math.floor(b / 4)) throw new Error(`group ${g} rows share a unit`);
+  }
 
-  // --- tapes ---
+  // --- tapes per group: derived from combined capacity of its matching rows ---
+  const groupCounts = new Array(GROUPS).fill(0).map(() => {
+    const fill = GROUP_FILL_MIN + counts.next() * (GROUP_FILL_MAX - GROUP_FILL_MIN);
+    return Math.min(GROUP_CAPACITY, Math.max(1, Math.round(GROUP_CAPACITY * fill)));
+  });
+  let total = groupCounts.reduce((s, n) => s + n, 0);
+  // top-up (seeded round-robin) until the board holds at least TOTAL_MIN tapes
+  const order = counts.shuffle([...Array(GROUPS).keys()]);
+  let oi = 0;
+  while (total < TOTAL_MIN) {
+    const g = order[oi % order.length];
+    oi++;
+    if (groupCounts[g] < GROUP_CAPACITY) { groupCounts[g]++; total++; }
+    else if (order.every(x => groupCounts[x] >= GROUP_CAPACITY)) break;
+  }
+
   const tapes: Tape[] = [];
   let id = 0;
-  const comboOrder = [...Array(COMBO_COUNT).keys()];
-  for (const combo of comboOrder) {
-    for (let n = 0; n < counts[combo]; n++) {
+  for (let g = 0; g < GROUPS; g++) {
+    for (let n = 0; n < groupCounts[g]; n++) {
       tapes.push({
-        id: id++, combo, defect: null, repaired: true, state: 'loose',
-        x: 0, y: 0, rot: 0, slot: null,
+        id: id++, combo: g, defect: null, repaired: true, state: 'loose',
+        x: 0, y: 0, rot: 0, row: null, slot: null,
       });
     }
   }
-  // shuffle so tape ids don't line up with combo order (scatter mixes the table)
+  // shuffle so ids don't line up with group order (scatter mixes the table)
   scatter.shuffle(tapes);
 
-  // --- defects: ~11%, exactly one each, all three types guaranteed present ---
+  // --- defects: ~11%, exactly one each, all three types present ---
   const defectCount = Math.max(18, Math.round(total * DEFECT_RATE));
   const defectIds = scatter.shuffle([...Array(total).keys()]).slice(0, defectCount);
   const typeOrder = defectRng.shuffle([...DEFECT_TYPES]);
@@ -91,69 +126,80 @@ export function generateWorld(seed: number): WorldData {
     tapes[tid].repaired = false;
   });
 
-  // --- rack grid (fixed geometry, one rack per combo) ---
-  const racks: Rack[] = [];
-  for (let row = 0; row < RACK_ROWS; row++) {
-    for (let col = 0; col < RACK_COLS; col++) {
-      const combo = row * RACK_COLS + col;
-      racks.push({ combo, slots: new Array(RACK_SLOTS).fill(null) });
-    }
-  }
-
-  // --- pile centers: several per zone, deterministic ---
+  // --- pile centers on a jittered grid over every usable region ---
   const zones = scatterZones();
-  const pileCenters: { x: number; y: number; zone: number }[] = [];
-  for (let zi = 0; zi < zones.length; zi++) {
-    const z = zones[zi];
-    const n = PILES_PER_ZONE[zi] ?? 2;
-    for (let i = 0; i < n; i++) {
-      const cx = layout.range(z.x0, z.x1);
-      const cy = layout.range(z.y0, z.y1);
-      pileCenters.push({ x: cx, y: cy, zone: pileCenters.length });
+  const pileCenters: { x: number; y: number }[] = [];
+  const zoneArea: number[] = [];
+  for (const z of zones) {
+    const cols = Math.max(1, Math.round((z.x1 - z.x0) / 300));
+    const rowsN = Math.max(1, Math.round((z.y1 - z.y0) / 260));
+    for (let c = 0; c < cols; c++) {
+      for (let r = 0; r < rowsN; r++) {
+        pileCenters.push({
+          x: z.x0 + (c + 0.5) * (z.x1 - z.x0) / cols + layout.jitter(60),
+          y: z.y0 + (r + 0.5) * (z.y1 - z.y0) / rowsN + layout.jitter(45),
+        });
+      }
     }
+    zoneArea.push((z.x1 - z.x0) * (z.y1 - z.y0));
   }
+  const totalArea = zoneArea.reduce((s, a) => s + a, 0);
 
-  // --- assign tapes to piles round-robin (shuffled), jittered positions ---
+  // --- ~28% strays (individual tapes) + cluster assignment round-robin ---
+  const strayCount = Math.floor(tapes.length * 0.28);
+  const strayIdx = new Set(scatter.shuffle([...Array(tapes.length).keys()]).slice(0, strayCount));
+  const pickStrayZone = (): Zone => {
+    const roll = layout.next() * totalArea;
+    let acc = 0;
+    for (let zi = 0; zi < zones.length; zi++) {
+      acc += zoneArea[zi];
+      if (roll <= acc) return zones[zi];
+    }
+    return zones[0];
+  };
   const pileOrder = scatter.shuffle([...Array(pileCenters.length).keys()]);
   const bench = benchRect();
   const placed: { x: number; y: number }[] = [];
   for (let i = 0; i < tapes.length; i++) {
-    const pile = pileCenters[pileOrder[i % pileOrder.length]];
-    let x = pile.x + scatter.jitter(150);
-    let y = pile.y + scatter.jitter(110);
-    // keep inside world margins
+    let x: number;
+    let y: number;
+    if (strayIdx.has(i)) {
+      const z = pickStrayZone();
+      x = layout.range(z.x0, z.x1);
+      y = layout.range(z.y0, z.y1);
+    } else {
+      const pile = pileCenters[pileOrder[i % pileCenters.length]];
+      x = pile.x + scatter.jitter(115);
+      y = pile.y + scatter.jitter(85);
+    }
     x = Math.max(70, Math.min(WORLD_W - 70, x));
     y = Math.max(90, Math.min(WORLD_H - 70, y));
     placed.push({ x, y });
   }
 
-  // --- placement with obstacles ---
-  // Rule: a tape center must stay in bounds, outside every rack rect (+pad) and
-  // outside the bench rect (+pad). Separation (anti-coverage) never moves a tape
-  // into a forbidden position; forbidden positions get pushed out inside the loop.
-  const MARGIN = 46; // > tape bounding radius (~32) so the validator's check clears
+  // --- placement with obstacles (units + bench) ---
+  const MARGIN = 40; // > tape bounding radius (~32): clearance around rack openings
   const badPos = (x: number, y: number): boolean => {
     if (x < 70 || x > WORLD_W - 70 || y < 90 || y > WORLD_H - 70) return true;
-    for (const rack of racks) {
-      const rr = rackRect(rack.combo);
-      if (inRect(x, y, rr, MARGIN)) return true;
+    for (let u = 0; u < UNITS; u++) {
+      if (inRect(x, y, unitRect(u), MARGIN)) return true;
     }
     if (inRect(x, y, bench, MARGIN)) return true;
     return false;
   };
-  const COV_X = TAPE_W * 0.55 + 2; // ~52.6
-  const COV_Y = TAPE_H * 0.55 + 2; // ~35
+  const COV_X = 92 * 0.55 + 2; // ~52.6 (light overlap allowed)
+  const COV_Y = 60 * 0.55 + 2; // ~35
   const cellOf = (x: number, y: number) => ((x / 128) | 0) * 8192 + ((y / 128) | 0);
 
-  // initial sweep: push any forbidden start out (below the rack, else nearest side)
+  // initial sweep: push any forbidden start out (below the unit, else nearest side)
   for (let i = 0; i < placed.length; i++) {
     let p = placed[i];
     for (let attempt = 0; attempt < 3; attempt++) {
       if (!badPos(p.x, p.y)) break;
       let moved = false;
-      for (const rack of racks) {
-        const rr = rackRect(rack.combo);
-        if (inRect(p.x, p.y, rr, MARGIN)) { p = pushOutOfRect(p, rr, MARGIN); moved = true; }
+      for (let u = 0; u < UNITS; u++) {
+        const ur = unitRect(u);
+        if (inRect(p.x, p.y, ur, MARGIN)) { p = pushOutOfRect(p, ur, MARGIN); moved = true; }
       }
       if (inRect(p.x, p.y, bench, MARGIN)) { p = pushOutOfRect(p, bench, MARGIN); moved = true; }
       if (!moved) break;
@@ -200,7 +246,6 @@ export function generateWorld(seed: number): WorldData {
   }
 
   // --- deterministic spiral repair: every tape must end conflict-free ---
-  // (separation alone can leave dense pockets; this pass guarantees the invariant)
   const conflictAt = (x: number, y: number, ignore: number, grid: Map<number, number[]>): boolean => {
     const cell = cellOf(x, y);
     for (let gx = -1; gx <= 1; gx++) for (let gy = -1; gy <= 1; gy++) {
@@ -233,7 +278,7 @@ export function generateWorld(seed: number): WorldData {
       const p = placed[i];
       if (!badPos(p.x, p.y) && !conflictAt(p.x, p.y, i, grid)) continue;
       let fixed = false;
-      for (let r = 40; r <= 680 && !fixed; r += 40) {
+      for (let r = 40; r <= 640 && !fixed; r += 40) {
         for (let a = 0; a < 12 && !fixed; a++) {
           const ang = (a / 12) * Math.PI * 2 + (i % 7) * 0.13; // deterministic phase
           const cx = p.x + Math.cos(ang) * r;
@@ -252,7 +297,7 @@ export function generateWorld(seed: number): WorldData {
   for (let i = 0; i < tapes.length; i++) {
     tapes[i].x = Math.round(placed[i].x * 10) / 10;
     tapes[i].y = Math.round(placed[i].y * 10) / 10;
-    tapes[i].rot = Math.round(scatter.jitter(0.22) * 100) / 100;
+    tapes[i].rot = Math.round(scatter.jitter(0.12) * 100) / 100;
   }
 
   return {
@@ -261,13 +306,13 @@ export function generateWorld(seed: number): WorldData {
     worldH: WORLD_H,
     totalTapes: total,
     tapes,
-    racks,
+    rows,
   };
 }
 
-/** Rack lookup by combo — trivial but keeps call sites honest. */
-export function rackForCombo(world: WorldData, combo: number): Rack {
-  return world.racks[combo]; // racks are stored in combo order
+/** Rows that accept a group (two matching rows, either equally valid). */
+export function rowsForGroup(world: WorldData, group: number): Row[] {
+  return rowsOfGroup(group).map(r => world.rows[r]);
 }
 
-export { rackPos };
+export { groupOfRow, rowsOfGroup, CENTER, CENTER_MIN_TAPES, UNIT_W, UNIT_H, ROWS_PER_GROUP };

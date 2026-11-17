@@ -1,26 +1,38 @@
 /**
- * Tidy Tapes — skills, marquee selection, slot guide and the two powers.
- * Powers gate ONLY themselves (15 s active / 60 s cooldown); expiry never
- * touches held tapes or the sorting session (no fail state anywhere).
+ * Tidy Tapes — skills, marquee selection, slot guide and the three powers (v2).
+ *
+ * Skill effects are separate (per the follow-up): spot damaged tapes (toggle),
+ * reveal misfiled tapes (power 15 s / 60 s), show compatible racks for the
+ * selected tape — BOTH matching rows including duplicates, with offscreen
+ * pointers — highlight other tapes with the same color + symbol (power 15/60),
+ * and the last skill: one-click pickup of matching loose tapes into free tray
+ * slots only (instant effect, 60 s cooldown; nothing teleports past capacity).
+ * Powers gate ONLY themselves; expiry never touches held tapes or the session.
  */
 import Phaser from 'phaser';
-import { GATHER_CAP, MARQUEE_CAP, POWER_ACTIVE_MS, POWER_COOLDOWN_MS, SKILL_THRESHOLDS, rackRect, slotPos } from '../config';
+import {
+  MARQUEE_CAP, POWER_ACTIVE_MS, POWER_COOLDOWN_MS, SKILL_THRESHOLDS,
+  rowRect, rowsOfGroup, slotPos,
+} from '../config';
 import { audio } from '../audio';
+import { defectBlocksFiling } from '../types';
 import type { GameScene, TapeView } from '../scenes/GameScene';
 import type { SkillId, Tape } from '../types';
 
-export type PowerId = 'matchScan' | 'matchGather';
+export type PowerId = 'misplaced' | 'matchScan' | 'matchGather';
 
 export interface PowerState { unlocked: boolean; activeUntil: number; cooldownUntil: number }
 
 const SKILL_INFO: Record<SkillId, { name: string; hint: string }> = {
   scanner: { name: 'Defect Scanner', hint: 'D — highlight tapes that need repair' },
-  guide: { name: 'Slot Guide', hint: 'Click a tape to see where it belongs' },
-  misplaced: { name: 'Misplaced Finder', hint: 'M — highlight tapes still loose' },
+  guide: { name: 'Slot Guide', hint: 'Click a tape — both of its rows light up' },
+  misplaced: { name: 'Misfile Finder', hint: 'M — reveal tapes in wrong rows (15 s)' },
   marquee: { name: 'Marquee Pickup', hint: 'Drag a box on the table to select up to 5' },
-  matchScan: { name: 'Match Scan', hint: 'Click a tape: highlights same color + symbol' },
-  matchGather: { name: 'Match Gather', hint: 'Click a tape: gathers its loose matches' },
+  matchScan: { name: 'Match Scan', hint: 'S — click a tape: highlights same color + symbol' },
+  matchGather: { name: 'Match Gather', hint: 'G — click a tape: loads its loose matches into the tray' },
 };
+
+const POWER_IDS: PowerId[] = ['misplaced', 'matchScan', 'matchGather'];
 
 export class SkillsController {
   scene: GameScene;
@@ -28,11 +40,11 @@ export class SkillsController {
     scanner: false, guide: false, misplaced: false, marquee: false, matchScan: false, matchGather: false,
   };
   powers: Record<PowerId, PowerState> = {
+    misplaced: { unlocked: false, activeUntil: 0, cooldownUntil: 0 },
     matchScan: { unlocked: false, activeUntil: 0, cooldownUntil: 0 },
     matchGather: { unlocked: false, activeUntil: 0, cooldownUntil: 0 },
   };
   scannerOn = false;
-  misplacedOn = false;
   selectMode = false; // touch: explicit Select mode (Pan is default)
 
   // marquee
@@ -54,12 +66,12 @@ export class SkillsController {
   lastScanTarget: number | null = null;
   lastScanMatchCount = 0;
 
-  // highlight rings (scanner / misplaced / match scan)
+  // highlight rings (scanner / misfile / match scan)
   private ringsGfx: Phaser.GameObjects.Graphics;
   private matchScanRingsGfx: Phaser.GameObjects.Graphics;
   private ringRedrawAt = 0;
 
-  // held badge for Match Gather
+  // held badge for gathered bundles
   private gatherBadge: Phaser.GameObjects.Text;
 
   private lastClickTape = -1;
@@ -87,20 +99,27 @@ export class SkillsController {
         changed = true;
         audio.play('unlock');
         this.scene.game.events.emit('toast', `New skill — ${SKILL_INFO[id].name}: ${SKILL_INFO[id].hint}`);
-        if (id === 'matchScan') this.powers.matchScan.unlocked = true;
-        if (id === 'matchGather') this.powers.matchGather.unlocked = true;
+        if (id === 'misplaced' || id === 'matchScan' || id === 'matchGather') {
+          this.powers[id].unlocked = true;
+        }
       }
     }
     if (changed) this.emitChanged();
+  }
+
+  /** after restoring saves / v1 migration: align power unlocks with skills */
+  syncPowerUnlocks(): void {
+    for (const id of POWER_IDS) this.powers[id].unlocked = !!this.unlocked[id];
+    this.emitChanged();
   }
 
   emitChanged(): void {
     this.scene.game.events.emit('skills:changed', {
       unlocked: { ...this.unlocked },
       scannerOn: this.scannerOn,
-      misplacedOn: this.misplacedOn,
       selectMode: this.selectMode,
       powers: {
+        misplaced: { ...this.powers.misplaced },
         matchScan: { ...this.powers.matchScan },
         matchGather: { ...this.powers.matchGather },
       },
@@ -108,23 +127,21 @@ export class SkillsController {
   }
 
   powersSave(): Record<string, { unlocked: boolean; activeUntil: number; cooldownUntil: number }> {
-    return {
-      matchScan: { unlocked: this.powers.matchScan.unlocked, activeUntil: 0, cooldownUntil: this.powers.matchScan.cooldownUntil },
-      matchGather: { unlocked: this.powers.matchGather.unlocked, activeUntil: 0, cooldownUntil: this.powers.matchGather.cooldownUntil },
-    };
+    const out: Record<string, { unlocked: boolean; activeUntil: number; cooldownUntil: number }> = {};
+    for (const id of POWER_IDS) {
+      out[id] = {
+        unlocked: this.powers[id].unlocked,
+        activeUntil: 0,
+        cooldownUntil: this.powers[id].cooldownUntil,
+      };
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------- toggles
   toggleScanner(): void {
     if (!this.unlocked.scanner) return;
     this.scannerOn = !this.scannerOn;
-    this.ringRedrawAt = 0;
-    this.emitChanged();
-  }
-
-  toggleMisplaced(): void {
-    if (!this.unlocked.misplaced) return;
-    this.misplacedOn = !this.misplacedOn;
     this.ringRedrawAt = 0;
     this.emitChanged();
   }
@@ -139,9 +156,6 @@ export class SkillsController {
     if (!this.unlocked.marquee) return; // gesture cannot batch-pick before unlock
     this.marqueeActive = true;
     this.marqueePointerId = pointerId;
-    if (window.location.search.includes('autotest')) {
-      console.log(`[marquee] begin at ${wp.x.toFixed(0)},${wp.y.toFixed(0)} ptr=${pointerId}`);
-    }
     this.marqueeStart = { ...wp };
     this.marqueeCurrent = { ...wp };
     this.marqueeGfx.setVisible(true);
@@ -170,9 +184,6 @@ export class SkillsController {
       if (t.x >= x0 && t.x <= x1 && t.y >= y0 && t.y <= y1) enclosed.push(t);
     }
     enclosed.sort((a, b) => (a.x - cx) ** 2 + (a.y - cy) ** 2 - ((b.x - cx) ** 2 + (b.y - cy) ** 2));
-    if (window.location.search.includes('autotest')) {
-      console.log(`[marquee] end rect=(${x0.toFixed(0)},${y0.toFixed(0)})-(${x1.toFixed(0)},${y1.toFixed(0)}) enclosed=${enclosed.length}`);
-    }
     this.selection.clear();
     for (const t of enclosed.slice(0, MARQUEE_CAP)) this.selection.add(t.id);
     this.drawSelection();
@@ -192,12 +203,7 @@ export class SkillsController {
   }
 
   onGrabSelection(leadId: number): void {
-    if (this.selection.has(leadId)) {
-      // grabbed a selected tape: the whole group follows (drag controller reads
-      // this.selection); rings stay until the drop clears them
-    } else {
-      this.clearSelection();
-    }
+    if (!this.selection.has(leadId)) this.clearSelection();
   }
 
   private drawMarquee(): void {
@@ -250,6 +256,7 @@ export class SkillsController {
   }
 
   // ------------------------------------------------------------- slot guide
+  /** both matching rows light up (duplicates included), with next-free-slot ghosts */
   selectGuide(id: number): void {
     this.guideTape = id;
     this.drawGuide();
@@ -267,24 +274,25 @@ export class SkillsController {
     if (this.guideTape === null) { g.setVisible(false); return; }
     const t = this.scene.tapeData(this.guideTape) as Tape | undefined;
     if (!t || t.state !== 'loose') { this.clearGuide(); return; }
-    // tape outline
     const view = this.scene.tapeViews.get(this.guideTape);
     if (view) {
       g.lineStyle(2.4, 0x9fe6a0, 0.95);
       g.strokeRoundedRect(view.container.x - 49, view.container.y - 33, 98, 66, 10);
     }
-    const rack = this.scene.world.racks[t.combo];
-    const slot = rack.slots.findIndex(s => s === null);
-    const r = rackRect(t.combo);
-    if (slot >= 0) {
-      const p = slotPos(t.combo, slot);
-      g.lineStyle(3, 0x9fe6a0, 0.95);
-      g.fillStyle(0x9fe6a0, 0.16);
-      g.fillRoundedRect(p.x - 10, p.y - 32, 20, 64, 5);
-      g.strokeRoundedRect(p.x - 10, p.y - 32, 20, 64, 5);
+    for (const rowId of rowsOfGroup(t.combo)) {
+      const row = this.scene.world.rows[rowId];
+      const r = rowRect(rowId);
+      g.lineStyle(3, 0x9fe6a0, 0.9);
+      g.strokeRoundedRect(r.x - 3, r.y - 3, r.w + 6, r.h + 6, 8);
+      const slot = row.slots.findIndex(s => s === null);
+      if (slot >= 0) {
+        const p = slotPos(rowId, slot);
+        g.lineStyle(3, 0x9fe6a0, 0.95);
+        g.fillStyle(0x9fe6a0, 0.16);
+        g.fillRoundedRect(p.x - 10, p.y - 16, 20, 32, 5);
+        g.strokeRoundedRect(p.x - 10, p.y - 16, 20, 32, 5);
+      }
     }
-    g.lineStyle(3, 0x9fe6a0, 0.9);
-    g.strokeRoundedRect(r.x - 4, r.y - 4, r.w + 8, r.h + 8, 10);
   }
 
   // ---------------------------------------------------------------- powers
@@ -292,18 +300,30 @@ export class SkillsController {
     return this.powers[id].activeUntil > this.scene.time.now;
   }
 
+  isPowerReady(id: PowerId): boolean {
+    const p = this.powers[id];
+    return p.unlocked && p.activeUntil <= this.scene.time.now && p.cooldownUntil <= this.scene.time.now;
+  }
+
   tryActivatePower(id: PowerId): boolean {
     const p = this.powers[id];
     if (!p.unlocked) return false;
     const now = this.scene.time.now;
     if (p.activeUntil > now || p.cooldownUntil > now) return false;
+    if (id === 'matchGather') {
+      // instant effect: the next matching click gathers; 60 s cooldown guards it
+      p.activeUntil = now + POWER_ACTIVE_MS;
+      p.cooldownUntil = now + POWER_ACTIVE_MS + POWER_COOLDOWN_MS;
+      this.emitChanged();
+      return true;
+    }
     p.activeUntil = now + POWER_ACTIVE_MS;
-    audio.play('chime');
+    p.cooldownUntil = now + POWER_ACTIVE_MS + POWER_COOLDOWN_MS;
     this.emitChanged();
     return true;
   }
 
-  // test/debug helper: expire + cooldown immediately
+  /** test/debug helper: expire + cooldown immediately */
   forceExpire(id: PowerId): void {
     const p = this.powers[id];
     const now = this.scene.time.now;
@@ -350,42 +370,56 @@ export class SkillsController {
         offscreen.push(o);
       }
     }
-    // offscreen matches => directional indicators + count (drawn by the HUD)
     this.scene.game.registry.set('matchHints', offscreen.length
-      ? { combo: t.combo, points: offscreen.map(o => ({ x: o.x, y: o.y })) }
+      ? { combo: t.combo, points: offscreen.slice(0, 8).map(o => ({ x: o.x, y: o.y })) }
       : null);
   }
 
+  /**
+   * One-click pickup of matching loose tapes into FREE tray slots only —
+   * nothing teleports past capacity; the rest stays where it is.
+   */
   gatherMatches(id: number): void {
     const t = this.scene.tapeData(id) as Tape | undefined;
     if (!t) return;
-    const drag = this.scene.drag;
-    if (drag.held) return; // already carrying a bundle
-    const eligible = this.scene.world.tapes.filter(o =>
-      o.state === 'loose' && o.combo === t.combo && !(o.defect && !o.repaired),
+    const scene = this.scene;
+    const free = scene.trayFreeSlots();
+    if (free === 0) {
+      scene.game.events.emit('hint', 'The tray is full — remove a tape first');
+      return;
+    }
+    const eligible = scene.world.tapes.filter(o =>
+      o.state === 'loose' && o.combo === t.combo && !(o.defect && !o.repaired && defectBlocksFiling(o.defect)),
     );
-    if (eligible.length === 0) return;
-    const views = eligible
-      .slice(0, GATHER_CAP)
-      .map(o => this.scene.tapeViews.get(o.id))
-      .filter((v): v is TapeView => !!v);
+    const take = eligible.filter(o => o.id !== t.id)
+      .slice(0, Math.max(0, free - (eligible.some(o => o.id === t.id) ? 1 : 0)));
+    const ids = [t.id, ...take.map(o => o.id)];
+    if (ids.length === 0) return;
+    let loaded = 0;
+    for (const tid of ids) {
+      if (scene.trayLoad(tid) >= 0) loaded++;
+      const v = scene.tapeViews.get(tid);
+      if (v) v.container.setVisible(false);
+    }
     audio.play('gather');
-    drag.holdGathered(views, this.scene.input.activePointer.id);
-    this.scene.game.registry.set('matchHints', null);
+    scene.game.events.emit('hint', `Match Gather — ${loaded} loaded into the tray`);
+    scene.game.registry.set('matchHints', null);
+    scene.emitCounters();
+    scene.save();
+    // the power does its job once per activation window: end it now
+    const p = this.powers.matchGather;
+    p.activeUntil = 0;
+    p.cooldownUntil = scene.time.now + POWER_COOLDOWN_MS;
+    this.emitChanged();
   }
 
   // ------------------------------------------------------------- repair open
   openRepair(id: number, others?: TapeView[]): void {
     if (others && others.length) {
-      this.scene.drag.releaseHeldOnTable(others, { x: 620, y: 1560 });
+      this.scene.drag.releaseHeldOnTable(others, { x: 620, y: 1680 });
     }
     this.clearGuide();
     this.matchScanRingsGfx.clear();
-    if (window.location.search.includes('autotest')) {
-      const mgr = this.scene.scene.settings as unknown as { manager?: { keys?: unknown } };
-      console.log(`[repair] opening tape ${id}`);
-      void mgr;
-    }
     this.scene.scene.pause('Game');
     this.scene.scene.launch('Repair', { tapeId: id });
     this.scene.game.events.emit('repair:open');
@@ -399,7 +433,7 @@ export class SkillsController {
       if (view) {
         if (view.overlay) view.overlay.setVisible(false);
         // return the tape to the sorting loop: loose at the bench edge
-        const spot = this.scene.drag.findTableSpotPublic(600, 1520);
+        const spot = this.scene.drag.findTableSpotPublic(600, 1490);
         view.container.setPosition(spot.x, spot.y).setRotation(0).setDepth(spot.y);
         t.x = spot.x; t.y = spot.y; t.rot = 0;
       }
@@ -413,33 +447,31 @@ export class SkillsController {
   update(): void {
     const now = this.scene.time.now;
 
-    // power lifecycle (timers gate only the powers themselves)
-    for (const id of ['matchScan', 'matchGather'] as PowerId[]) {
+    for (const id of POWER_IDS) {
       const p = this.powers[id];
       if (p.activeUntil > 0 && p.activeUntil <= now) this.expirePower(id);
     }
 
-    // ring pulses (redraw at most ~3x/s while toggles are on)
+    // ring pulses (redraw at most ~3x/s while toggles/powers are on)
     if (now - this.ringRedrawAt > 330) {
       this.ringRedrawAt = now;
       if (this.scannerOn) this.drawScannerRings();
-      else if (!this.misplacedOn) this.ringsGfx.clear();
-      if (this.misplacedOn) this.drawMisplacedRings();
+      else if (!this.isPowerActive('misplaced')) this.ringsGfx.clear();
+      if (this.isPowerActive('misplaced')) this.drawMisfileRings();
       if (this.guideTape !== null) this.drawGuide();
       if (this.lastScanTarget !== null && this.isPowerActive('matchScan')) this.scanMatches(this.lastScanTarget);
     }
 
-    // gather badge follows the held bundle
+    // gather badge follows a held bundle
     const held = this.scene.drag.held;
     if (held && held.fromGather) {
       this.gatherBadge.setVisible(true)
         .setText(`x${held.tapes.length}`)
         .setPosition(held.lead.container.x + 40, held.lead.container.y - 40);
-    } else if (held === null || !held.fromGather) {
+    } else {
       this.gatherBadge.setVisible(false);
     }
 
-    // guide / match offscreen hints consumed by the HUD scene
     this.updateRegistryHints();
   }
 
@@ -455,35 +487,39 @@ export class SkillsController {
     }
   }
 
-  private drawMisplacedRings(): void {
+  /** reveal misfiled tapes only while the power is active (never before) */
+  private drawMisfileRings(): void {
     const g = this.ringsGfx;
     g.clear();
-    // loose tapes are misplaced by definition; correct shelved ones never highlighted
-    g.lineStyle(2.2, 0xffd27f, 0.75);
+    g.lineStyle(2.6, 0xffd27f, 0.95);
     for (const t of this.scene.world.tapes) {
-      if (t.state !== 'loose') continue;
+      if (t.state !== 'shelved') continue;
+      const row = this.scene.world.rows[t.row as number];
+      if (!row || row.group === t.combo) continue;
       const v = this.scene.tapeViews.get(t.id);
       if (!v) continue;
-      g.strokeRoundedRect(v.container.x - 49, v.container.y - 33, 98, 66, 10);
+      g.strokeRoundedRect(v.container.x - 13, v.container.y - 17, 26, 34, 5);
+      g.lineStyle(2, 0xffd27f, 0.5);
+      g.strokeCircle(v.container.x, v.container.y, 24);
+      g.lineStyle(2.6, 0xffd27f, 0.95);
     }
   }
 
   private updateRegistryHints(): void {
     const view = this.scene.cameras.main.worldView;
-    // slot-guide: point at the tape's rack when it is offscreen
+    // slot-guide: offscreen pointers for BOTH matching rows
     if (this.guideTape !== null) {
       const t = this.scene.tapeData(this.guideTape) as Tape | undefined;
       if (t) {
-        const r = rackRect(t.combo);
-        const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
-        if (cx < view.x || cx > view.right || cy < view.y || cy > view.bottom) {
-          this.scene.game.registry.set('guideHint', { x: cx, y: cy });
-        } else {
-          this.scene.game.registry.set('guideHint', null);
+        const pts: { x: number; y: number }[] = [];
+        for (const rowId of rowsOfGroup(t.combo)) {
+          const r = rowRect(rowId);
+          pts.push({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
         }
+        const off = pts.filter(p => p.x < view.x || p.x > view.right || p.y < view.y || p.y > view.bottom);
+        this.scene.game.registry.set('guideHint', off.length ? { points: off } : null);
       }
     }
-    // match scan offscreen arrows are set by scanMatches
   }
 }
 
