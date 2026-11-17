@@ -60,7 +60,14 @@ function pickIsolatedTape(minDist = 62): { id: number; combo: number; defect: st
   return tapes[0];
 }
 
+function liveGame(): Phaser.Game {
+  return (window as unknown as { __phaserGame: Phaser.Game }).__phaserGame;
+}
+
 function canvasEl(game: Phaser.Game): HTMLCanvasElement {
+  // always the live canvas: an HMR swap must not send events into a detached canvas
+  const live = liveGame();
+  if (live && live.canvas && live.canvas.isConnected) return live.canvas;
   return game.canvas;
 }
 
@@ -137,11 +144,13 @@ function keyEvent(type: string, key: string, code: string, keyCode: number): voi
 
 /** world -> screen via runtime calibration of camera.getWorldPoint (zoom-safe). */
 function makeWorldToScreen(game: Phaser.Game): (wx: number, wy: number) => { sx: number; sy: number } {
-  const cam = game.scene.getScene('Game')?.cameras.main;
+  const live = liveGame();
+  const cam = (live ?? game).scene.getScene('Game')?.cameras.main;
   assert(!!cam, 'camera available');
-  const c = (game.scene.getScene('Game') as { cameras: { main: { getWorldPoint(x: number, y: number): { x: number; y: number } } } }).cameras.main;
-  const halfW = game.scale.width / 2;
-  const halfH = game.scale.height / 2;
+  const src = live ?? game;
+  const c = (src.scene.getScene('Game') as { cameras: { main: { getWorldPoint(x: number, y: number): { x: number; y: number } } } }).cameras.main;
+  const halfW = src.scale.width / 2;
+  const halfH = src.scale.height / 2;
   const m0 = c.getWorldPoint(halfW, halfH);
   const mX = c.getWorldPoint(halfW + 80, halfH);
   const mY = c.getWorldPoint(halfW, halfH + 60);
@@ -302,6 +311,7 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
   const test = async (name: string, fn: () => Promise<void>) => {
     const t0 = Date.now();
     try {
+      assert(liveGame() === game, 'game instance stable (no mid-run HMR swap)');
       await fn();
       results.push({ name, pass: true, ms: Date.now() - t0 });
       console.log(`[autotest] PASS ${name}`);
@@ -354,7 +364,7 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       pointerEvent(game, 'pointermove', s0.sx + 130, s0.sy + 90);
       await waitFrames(game, 3);
       const live = tidy().spritePos(tape.id)!;
-      const cam = game.scene.getScene('Game')!.cameras.main;
+      const cam = liveGame().scene.getScene('Game')!.cameras.main;
       const wp = cam.getWorldPoint(s0.sx + 130, s0.sy + 90);
       assert(approx(live.x, wp.x - grab.x, 0.75), `moved grab point: tape ${live.x.toFixed(1)} vs ${((wp.x - grab.x)).toFixed(1)}`);
       assert(approx(live.y, wp.y - grab.y, 0.75), `moved grab point y`);
@@ -391,7 +401,7 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       pointerEvent(game, 'pointermove', s0.sx - 60, s0.sy + 40);
       await waitFrames(game, 3);
       const live = tidy().spritePos(tape.id)!;
-      const cam = game.scene.getScene('Game')!.cameras.main;
+      const cam = liveGame().scene.getScene('Game')!.cameras.main;
       const wp = cam.getWorldPoint(s0.sx - 60, s0.sy + 40);
       assert(approx(live.x, wp.x - grab.x, 1), `zoom drag x: ${live.x.toFixed(1)} vs ${(wp.x - grab.x).toFixed(1)}`);
       assert(approx(live.y, wp.y - grab.y, 1), 'zoom drag y');
@@ -761,7 +771,7 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       pointerEvent(game, 'pointermove', s0.sx + 70, s0.sy - 40);
       await waitFrames(game, 3);
       const live = tidy().spritePos(tape.id)!;
-      const cam = game.scene.getScene('Game')!.cameras.main;
+      const cam = liveGame().scene.getScene('Game')!.cameras.main;
       const wp = cam.getWorldPoint(s0.sx + 70, s0.sy - 40);
       assert(approx(live.x, wp.x - grab.x, 1), `post-resize drag x ${live.x.toFixed(1)} vs ${(wp.x - grab.x).toFixed(1)}`);
       assert(approx(live.y, wp.y - grab.y, 1), 'post-resize drag y');
