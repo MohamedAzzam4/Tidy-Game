@@ -432,6 +432,7 @@ export class GameScene extends Phaser.Scene {
     this.sortedCount = this.world.tapes.filter(t2 => t2.state === 'shelved').length;
     this.skills.onShelved(this.sortedCount);
     this.emitCounters();
+    this.checkCompletion();
     return shelved;
   }
 

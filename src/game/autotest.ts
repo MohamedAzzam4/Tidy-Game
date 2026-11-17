@@ -730,6 +730,10 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
     });
 
     await test('T12 touch: two-finger pan moves the camera, never selects', async () => {
+      // keep gestures inside the canvas: Phaser ignores touch moves whose
+      // elementFromPoint is off-canvas
+      d.setCamera(2400, 1600, 1);
+      await waitFrames(game, 3);
       const before = tidy().camera();
       const w2s = makeWorldToScreen(game);
       const c = w2s(2400, 1600);
