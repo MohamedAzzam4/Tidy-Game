@@ -459,6 +459,10 @@ export class UIScene extends Phaser.Scene {
       this.onSkills();
       game.emitCounters();
       this.redrawTray();
+      if (this.game.registry.get('v1SaveFound')) {
+        this.game.registry.remove('v1SaveFound');
+        this.showMigrate();
+      }
     }
   }
 

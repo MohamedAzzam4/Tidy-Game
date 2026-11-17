@@ -325,7 +325,19 @@ export class DragController {
   }
 
   update(): void {
+    // self-heal: if a pointerup was ever swallowed (input edge cases), resolve
+    // the dangling drag at the pointer's last position instead of freezing it
+    if (this.trayBatchDrag) {
+      const bp = this.scene.input.manager.pointers.find(p => p.id === this.trayBatchDrag!.pointerId);
+      if (bp && !bp.isDown) this.resolveTrayBatch(bp);
+      return;
+    }
     const held = this.held;
+    if (held) {
+      const hp = this.scene.input.manager.pointers.find(p => p.id === held.pointerId)
+        ?? this.scene.input.activePointer;
+      if (!hp.isDown) { this.onPointerUp(hp); return; }
+    }
     if (!held) { this.updateHover(null, null); return; }
     // cursor-accurate: recompute every frame from the ACTIVE camera
     const pointer = this.scene.input.manager.pointers.find(p => p.id === held.pointerId)

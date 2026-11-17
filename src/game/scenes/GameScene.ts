@@ -321,11 +321,13 @@ export class GameScene extends Phaser.Scene {
     const cam = this.cameras.main;
     const z = Phaser.Math.Clamp(targetZoom, ZOOM_MIN, ZOOM_MAX);
     if (z === cam.zoom) return;
-    const before = cam.getWorldPoint(screenX, screenY);
+    // pure math (getWorldPoint reads cached matrices around setZoom, which
+    // silently cancels the anchor correction)
+    const wx = cam.scrollX + screenX / cam.zoom;
+    const wy = cam.scrollY + screenY / cam.zoom;
     cam.setZoom(z);
-    const after = cam.getWorldPoint(screenX, screenY);
-    cam.scrollX += before.x - after.x;
-    cam.scrollY += before.y - after.y;
+    cam.scrollX = wx - screenX / z;
+    cam.scrollY = wy - screenY / z;
     this.game.events.emit('camera:zoom', z);
   }
 
@@ -427,8 +429,8 @@ export class GameScene extends Phaser.Scene {
       try {
         const raw1 = localStorage.getItem('tidy-tapes-save-v1');
         if (raw1) {
+          // flag only: the UI scene shows the choice panel when it becomes ready
           this.game.registry.set('v1SaveFound', true);
-          this.game.events.once('game:ready', () => this.game.events.emit('migrate:ask'));
         }
       } catch { /* ignore */ }
     }
@@ -613,9 +615,14 @@ export class GameScene extends Phaser.Scene {
       if (shelved >= count) break;
       if (t.state !== 'loose' || (t.defect && !t.repaired)) continue;
       if (combo !== undefined && t.combo !== combo) continue;
-      const row = this.world.rows[rowsOfGroup(t.combo)[0]];
-      const slot = row.slots.findIndex(s => s === null);
-      if (slot < 0) continue;
+      let row: typeof this.world.rows[number] | null = null;
+      let slot = -1;
+      for (const rowId of rowsOfGroup(t.combo)) {
+        const r = this.world.rows[rowId];
+        const k = r.slots.findIndex(x => x === null);
+        if (k >= 0) { row = r; slot = k; break; }
+      }
+      if (!row || slot < 0) continue;
       this.seatTape(t.id, row.id, slot, true);
       shelved++;
     }

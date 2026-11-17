@@ -26,7 +26,9 @@ export default function GameMount() {
         type: Phaser.AUTO,
         parent: hostRef.current,
         backgroundColor: '#3a2314',
-        input: { touch: true }, // headless browsers report no touch device; the game supports touch anyway
+        input: {
+          touch: true, // headless browsers report no touch device; the game supports touch anyway
+        },
         scale: {
           mode: Phaser.Scale.RESIZE,
           width: '100%',
@@ -36,6 +38,10 @@ export default function GameMount() {
         scene: [BootScene, GameScene, UIScene, RepairScene],
       });
       gameRef.current = game;
+      // Phaser 3.90 hardcodes globalTopOnly=true (no config option): UI-scene
+      // zones would swallow pointerups of an ongoing world drag. Disabled at
+      // runtime — per-scene topOnly still applies within each scene.
+      game.input.globalTopOnly = false;
       (window as unknown as { __phaserGame: unknown }).__phaserGame = game;
 
       // debug + autotest hooks (dev-only, harmless in production)
