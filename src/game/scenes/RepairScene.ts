@@ -481,6 +481,20 @@ export class RepairScene extends Phaser.Scene {
     this.scene.stop('Repair');
   }
 
+  update(): void {
+    // live state probe for the test harness (autotest pages only)
+    if (window.location.search.includes('autotest')) {
+      (window as unknown as { __repair?: unknown }).__repair = {
+        kind: this.kind, phase: this.phase, done: this.done,
+        peelDist: Math.round(this.peelDist), wipeDist: Math.round(this.wipeDist),
+        wind: Math.round(this.windProgress * 100) / 100,
+        coverage: this.coverage.size, rubDist: Math.round(this.rubDist),
+        pdown: this.pointerDown,
+        cx: Math.round(this.cx), cy: Math.round(this.cy),
+      };
+    }
+  }
+
   // ------------------------------------------------------------------ input
   private onMove(p: Phaser.Input.Pointer): void {
     if (this.done) return;
