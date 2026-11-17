@@ -29,11 +29,17 @@ function approx(a: number, b: number, eps: number): boolean {
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
+const nextFrame = (): Promise<void> => new Promise<void>(r => {
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => r());
+  else setTimeout(r, 16);
+});
+
 async function waitFrames(game: Phaser.Game, n: number): Promise<void> {
   for (let i = 0; i < n; i++) {
-    await new Promise<void>(r => game.events.once('postupdate', r));
-    await sleep(16);
+    await nextFrame();
+    await sleep(12);
   }
+  void game;
 }
 
 async function waitUntil(cond: () => boolean, timeoutMs = 15000, what = 'condition'): Promise<void> {
