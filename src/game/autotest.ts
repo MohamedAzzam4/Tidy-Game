@@ -93,6 +93,8 @@ function pointerEvent(game: Phaser.Game, type: string, sx: number, sy: number, o
       identifier: opts.pointerId ?? 1,
       target: cv,
       clientX: sx, clientY: sy,
+      pageX: sx, pageY: sy,          // Phaser's transformPointer reads pageX/pageY
+      screenX: sx, screenY: sy,
     });
     const init: TouchEventInit = {
       bubbles: true, cancelable: true,
@@ -121,7 +123,12 @@ function touchEventMulti(
 ): void {
   const cv = canvasEl(game);
   const mk = (p: { id: number; x: number; y: number }) =>
-    new Touch({ identifier: p.id, target: cv, clientX: p.x, clientY: p.y });
+    new Touch({
+      identifier: p.id, target: cv,
+      clientX: p.x, clientY: p.y,
+      pageX: p.x, pageY: p.y,
+      screenX: p.x, screenY: p.y,
+    });
   const touches = points.map(mk);
   const changed = points.filter(p => changedIds.includes(p.id)).map(mk);
   cv.dispatchEvent(new TouchEvent(domType, {
