@@ -66,6 +66,10 @@ export class DragController {
           this.releaseHeldOnTable(this.held.tapes, wp);
           this.held = null;
         }
+        // two fingers: hand over from single-finger pan to pinch-pan
+        // (otherwise both pan paths fire and cancel each other out)
+        this.panDrag = null;
+        this.skills.cancelMarquee();
         this.touchPan = {
           pointers: uniq.map(p => p.id),
           centroid: {

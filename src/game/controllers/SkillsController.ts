@@ -183,6 +183,14 @@ export class SkillsController {
     this.drawSelection();
   }
 
+  /** two-finger gesture takes over: cancel any running marquee */
+  cancelMarquee(): void {
+    if (!this.marqueeActive) return;
+    this.marqueeActive = false;
+    this.marqueePointerId = -1;
+    this.marqueeGfx.setVisible(false).clear();
+  }
+
   onGrabSelection(leadId: number): void {
     if (this.selection.has(leadId)) {
       // grabbed a selected tape: the whole group follows (drag controller reads
