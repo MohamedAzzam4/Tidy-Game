@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>TIDEKEEPER — a bioluminescent tidy-up ritual</title>
+<meta name="description" content="Sort glowing plankton motes into glass bells and stone niches. A cozy, seeded, procedurally generated tidy-up game with a skill system.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23042545'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%238fe8d2'/%3E%3Ccircle cx='16' cy='16' r='10' fill='none' stroke='%238fe8d2' stroke-opacity='.5' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<canvas id="sea" aria-label="TIDEKEEPER game field"></canvas>
+
+<!-- HUD -->
+<div id="hud" class="hidden">
+  <div class="hud-left">
+    <div class="chip pearls" title="Pearls — currency for Attunements">
+      <svg viewBox="0 0 24 24" class="ic"><circle cx="12" cy="12" r="6" fill="url(#pearlg)"/><defs><radialGradient id="pearlg"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#9db8ff"/></radialGradient></defs></svg>
+      <span id="pearlCount">0</span>
+    </div>
+    <div class="chip rank">
+      <span class="rank-label">Keeper <b id="rankNum">I</b></span>
+      <div class="xpbar"><div id="xpFill"></div></div>
+    </div>
+    <div class="chip streak hidden" id="streakChip">
+      <span class="streak-label">streak</span> <b id="streakNum">0</b>
+    </div>
+  </div>
+  <div class="hud-right">
+    <span class="chip expedition" id="expLabel">Expedition I</span>
+    <button class="icon-btn" id="btnMute" aria-label="Toggle sound" title="Sound (M)">
+      <svg viewBox="0 0 24 24" class="ic"><path id="muteIcon" d="M3 9v6h4l5 4V5L7 9H3z" fill="currentColor"/><path id="muteWave" d="M16 8c1.5 1.5 1.5 6.5 0 8M18.5 6c2.5 2.8 2.5 9.2 0 12" stroke="currentColor" fill="none" stroke-width="1.8" stroke-linecap="round"/></svg>
+    </button>
+    <button class="icon-btn" id="btnSettings" aria-label="Settings" title="Settings">
+      <svg viewBox="0 0 24 24" class="ic"><path d="M12 8a4 4 0 100 8 4 4 0 000-8zm9 4l-2-.5.3-2-1.9-.8.8-1.9-1.9-.8.5-2-2 .3L13 1l-.5 2h-2L10 1l-1.8.8.3 2-2 .3.5 2-1.9.8.8 1.9-1.9.8.3 2-2 .5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="icon-btn" id="btnSkills" aria-label="Attunements" title="Attunements (skills)">
+      <svg viewBox="0 0 24 24" class="ic"><path d="M12 2l2.2 5.6L20 9.5l-4.2 3.9 1.1 5.8L12 16.4l-4.9 2.8 1.1-5.8L4 9.5l5.8-1.9z" fill="currentColor"/></svg>
+    </button>
+  </div>
+</div>
+
+<button id="activeBtn" class="hidden" title="Use Attunement (E)">
+  <span id="activeIcon"></span>
+  <span id="activeName"></span>
+  <div id="activeCd"></div>
+</button>
+
+<div id="toast" class="toast hidden"></div>
+
+<!-- Title -->
+<section id="titleScreen" class="screen">
+  <div class="panel title-panel">
+    <h1 class="game-title">Tidekeeper</h1>
+    <p class="tagline">a bioluminescent tidy-up ritual</p>
+    <p class="lore">The grotto tide has scattered the glowing motes. File every mote into its glass bell, and every bell into its stone niche. Nothing here can hurt you. The abyss is patient.</p>
+    <div class="menu">
+      <button id="btnDive" class="btn primary">Dive in — Expedition <span id="nextExp">1</span></button>
+      <div class="code-row">
+        <input id="codeInput" placeholder="TIDE-XXXX" maxlength="9" aria-label="Expedition code">
+        <button id="btnCode" class="btn small">Same mess as a friend</button>
+      </div>
+      <div class="row">
+        <button id="btnHow" class="btn ghost">How to play</button>
+        <button id="btnSkillsOpen" class="btn ghost">Attunements</button>
+        <button id="btnSettingsOpen" class="btn ghost">Settings</button>
+      </div>
+    </div>
+    <div id="tideLog" class="tide-log"></div>
+  </div>
+</section>
+
+<!-- Expedition intro -->
+<section id="introScreen" class="screen hidden">
+  <div class="panel">
+    <h2>Expedition <span id="introExp">1</span></h2>
+    <p class="code-big" id="introCode">TIDE-XXXX</p>
+    <p class="muted small">Same code, same mess — share it and a friend tidies the exact same grotto.</p>
+    <div id="legend" class="legend"></div>
+    <p class="muted small" id="introHint">Drag a mote into its bell — same glyph, same pips. Then carry full bells to their niche on the wall. Tap once to carry hands-free.</p>
+    <button id="btnDiveIn" class="btn primary">Submerge</button>
+    <button id="btnIntroBack" class="btn ghost">Back</button>
+  </div>
+</section>
+
+<!-- Bloom card (expedition complete) -->
+<section id="bloomScreen" class="screen hidden">
+  <div class="panel bloom-panel">
+    <h2 class="bloom-title">The Grotto Blooms</h2>
+    <p class="lore">Every mote filed, every bell seated, every niche glowing. The abyss hums a chord it will remember.</p>
+    <div class="stats">
+      <div class="stat"><b id="stMotes">0</b><span>motes filed</span></div>
+      <div class="stat"><b id="stBells">0</b><span>bells seated</span></div>
+      <div class="stat"><b id="stStreak">0</b><span>best streak</span></div>
+      <div class="stat"><b id="stPearls">+0</b><span>pearls earned</span></div>
+      <div class="stat"><b id="stLumen">0</b><span>lumen found</span></div>
+    </div>
+    <p id="rankNotice" class="rank-notice hidden"></p>
+    <button id="btnNext" class="btn primary">Next tide — Expedition <span id="nextExp2">2</span></button>
+    <button id="btnSurface" class="btn ghost">Return to surface</button>
+  </div>
+</section>
+
+<!-- Skills -->
+<section id="skillsScreen" class="screen hidden">
+  <div class="panel wide">
+    <h2>Attunements</h2>
+    <p class="muted small">Gentle currents, not powers. Equip up to <b>2 passives</b> and <b>1 active</b>. Pearls come from filing well.</p>
+    <div class="pearl-balance">Pearls: <b id="skillPearls">0</b></div>
+    <div id="skillList" class="skill-list"></div>
+    <button id="btnSkillsBack" class="btn ghost">Back</button>
+  </div>
+</section>
+
+<!-- Settings -->
+<section id="settingsScreen" class="screen hidden">
+  <div class="panel">
+    <h2>Settings</h2>
+    <div class="setting">
+      <label>Master volume</label>
+      <input type="range" id="volMaster" min="0" max="1" step="0.01">
+    </div>
+    <div class="setting">
+      <label>Music & ambience</label>
+      <input type="range" id="volMusic" min="0" max="1" step="0.01">
+    </div>
+    <div class="setting">
+      <label>Effects</label>
+      <input type="range" id="volSfx" min="0" max="1" step="0.01">
+    </div>
+    <div class="setting check">
+      <label><input type="checkbox" id="tapCarry"> Tap-to-carry (pick up with a tap, place with a tap — kinder on hands)</label>
+    </div>
+    <div class="setting check">
+      <label><input type="checkbox" id="reduceMotion"> Calmer waters (less motion & particles)</label>
+    </div>
+    <button id="btnReset" class="btn ghost danger">Reset keeper progress</button>
+    <button id="btnSettingsBack" class="btn ghost">Back</button>
+  </div>
+</section>
+
+<!-- How to play -->
+<section id="howScreen" class="screen hidden">
+  <div class="panel wide">
+    <h2>How to play</h2>
+    <ol class="how">
+      <li><b>File motes into bells.</b> A mote belongs in the bell with the <b>same glyph and same number of pips</b>. Drag it over the bell, or tap it, then tap the bell.</li>
+      <li><b>Seat full bells into niches.</b> The stone wall holds one niche per bell — same glyph, same pips. Carry the bell down.</li>
+      <li><b>Build a streak.</b> Every correct filing rings one note higher on a pentatonic ladder. A wrong drop only softens it — nothing is ever taken from you.</li>
+      <li><b>Watch for Lumen motes.</b> The prismatic ones hum. They pay triple pearls.</li>
+      <li><b>Spend pearls on Attunements</b> — Lantern Hand, Double Sip, Echo Pulse and friends — between tides.</li>
+    </ol>
+    <p class="muted small">Press <b>E</b> for your active Attunement, <b>M</b> to mute, <b>Esc</b> to put a mote down. Inspired by “Filing Good: Tidy Up” by Inglobrio — same cozy two-tier filing loop, a different ocean.</p>
+    <button id="btnHowBack" class="btn ghost">Back</button>
+  </div>
+</section>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

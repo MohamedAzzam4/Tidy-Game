@@ -1,0 +1,34 @@
+# Deploys TIDEKEEPER from this branch (tidekeeper) to GitHub Pages.
+# main keeps its own Vite/Cozy Corner deploy workflow; deploys serialize on the
+# "pages" concurrency group so the last push wins the site, as GitHub intends.
+
+name: Deploy tidekeeper to Pages
+
+on:
+  push:
+    branches: [tidekeeper]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+      - id: deployment
+        uses: actions/deploy-pages@v4

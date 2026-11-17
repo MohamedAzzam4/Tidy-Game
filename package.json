@@ -1,0 +1,11 @@
+{
+  "name": "tidekeeper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "TIDEKEEPER - a bioluminescent tidy-up ritual. Zero dependencies: vanilla ES modules + Canvas 2D + Web Audio.",
+  "scripts": {
+    "start": "python3 -m http.server 8080",
+    "test": "node tests/run.mjs"
+  }
+}
