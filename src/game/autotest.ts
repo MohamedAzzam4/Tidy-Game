@@ -51,26 +51,67 @@ async function waitUntil(cond: () => boolean, timeoutMs = 15000, what = 'conditi
 }
 
 // ---------------------------------------------------------------- event synth
-let ptrSeq = 100;
 function canvasEl(game: Phaser.Game): HTMLCanvasElement {
   return game.canvas;
 }
 
+/**
+ * Phaser 3.90 binds MOUSE events (mousedown/mousemove/mouseup/wheel) and TOUCH
+ * events (touchstart/touchmove/touchend) on the canvas — not PointerEvents.
+ * Synthetic dispatch of PointerEvent does not auto-generate the compat mouse
+ * events, so the harness dispatches the events Phaser actually listens to.
+ */
 function pointerEvent(game: Phaser.Game, type: string, sx: number, sy: number, opts: {
   pointerId?: number; pointerType?: string; button?: number; buttons?: number; isPrimary?: boolean;
 } = {}): void {
-  const target = canvasEl(game);
-  const ev = new PointerEvent(type, {
-    bubbles: true, cancelable: true, composed: true,
-    pointerId: opts.pointerId ?? 1,
-    pointerType: opts.pointerType ?? 'mouse',
-    isPrimary: opts.isPrimary ?? true,
-    button: opts.button ?? 0,
-    buttons: opts.buttons ?? (type === 'pointerup' ? 0 : 1),
-    clientX: sx, clientY: sy,
-    screenX: sx, screenY: sy,
-  });
-  target.dispatchEvent(ev);
+  const cv = canvasEl(game);
+  const isTouch = opts.pointerType === 'touch';
+  let domType: string;
+  if (isTouch) {
+    domType = type === 'pointerdown' ? 'touchstart' : type === 'pointermove' ? 'touchmove' : 'touchend';
+  } else {
+    domType = type === 'pointerdown' ? 'mousedown' : type === 'pointermove' ? 'mousemove' : 'mouseup';
+  }
+  if (isTouch) {
+    const touch = new Touch({
+      identifier: opts.pointerId ?? 1,
+      target: cv,
+      clientX: sx, clientY: sy,
+    });
+    const init: TouchEventInit = {
+      bubbles: true, cancelable: true,
+      touches: [touch],
+      changedTouches: [touch],
+      targetTouches: [touch],
+    };
+    cv.dispatchEvent(new TouchEvent(domType, init));
+  } else {
+    const buttons = opts.buttons ?? (domType === 'mouseup' ? 0 : 1);
+    cv.dispatchEvent(new MouseEvent(domType, {
+      bubbles: true, cancelable: true, composed: true,
+      clientX: sx, clientY: sy, screenX: sx, screenY: sy,
+      button: opts.button ?? 0,
+      buttons,
+    }));
+  }
+}
+
+/** multi-finger touch event: all active touches + the moving ones. */
+function touchEventMulti(
+  game: Phaser.Game,
+  domType: 'touchstart' | 'touchmove' | 'touchend',
+  points: { id: number; x: number; y: number }[],
+  changedIds: number[],
+): void {
+  const cv = canvasEl(game);
+  const mk = (p: { id: number; x: number; y: number }) =>
+    new Touch({ identifier: p.id, target: cv, clientX: p.x, clientY: p.y });
+  const touches = points.map(mk);
+  const changed = points.filter(p => changedIds.includes(p.id)).map(mk);
+  cv.dispatchEvent(new TouchEvent(domType, {
+    bubbles: true, cancelable: true,
+    touches, changedTouches: changed, targetTouches: touches,
+  }));
 }
 
 function wheelEvent(game: Phaser.Game, sx: number, sy: number, dx: number, dy: number): void {
@@ -659,15 +700,24 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       const before = tidy().camera();
       const w2s = makeWorldToScreen(game);
       const c = w2s(2400, 1600);
-      pointerEvent(game, 'pointerdown', c.sx - 40, c.sy, { pointerId: 1, pointerType: 'touch' });
-      pointerEvent(game, 'pointerdown', c.sx + 40, c.sy, { pointerId: 2, pointerType: 'touch', isPrimary: false });
+      touchEventMulti(game, 'touchstart', [
+        { id: 1, x: c.sx - 40, y: c.sy },
+      ], [1]);
+      touchEventMulti(game, 'touchstart', [
+        { id: 1, x: c.sx - 40, y: c.sy },
+        { id: 2, x: c.sx + 40, y: c.sy },
+      ], [2]);
       for (let i = 1; i <= 6; i++) {
-        pointerEvent(game, 'pointermove', c.sx - 40 - i * 12, c.sy - i * 8, { pointerId: 1, pointerType: 'touch' });
-        pointerEvent(game, 'pointermove', c.sx + 40 - i * 12, c.sy - i * 8, { pointerId: 2, pointerType: 'touch' });
+        touchEventMulti(game, 'touchmove', [
+          { id: 1, x: c.sx - 40 - i * 12, y: c.sy - i * 8 },
+          { id: 2, x: c.sx + 40 - i * 12, y: c.sy - i * 8 },
+        ], [1, 2]);
         await sleep(30);
       }
-      pointerEvent(game, 'pointerup', c.sx - 112, c.sy - 48, { pointerId: 1, pointerType: 'touch' });
-      pointerEvent(game, 'pointerup', c.sx - 32, c.sy - 48, { pointerId: 2, pointerType: 'touch' });
+      touchEventMulti(game, 'touchend', [
+        { id: 1, x: c.sx - 112, y: c.sy - 48 },
+        { id: 2, x: c.sx - 32, y: c.sy - 48 },
+      ], [1, 2]);
       await waitFrames(game, 3);
       const after = tidy().camera();
       assert(after.x !== before.x || after.y !== before.y, `two-finger pan moved camera (${before.x},${before.y} -> ${after.x},${after.y})`);

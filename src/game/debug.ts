@@ -42,6 +42,7 @@ export interface TidyDebug {
   completed(): boolean;
   resize(w: number, h: number): void;
   scanInfo(): { target: number | null; count: number };
+  sceneInfo(): Record<string, { active: boolean; paused: boolean; sleeping: boolean }>;
 }
 
 export function installDebug(game: Phaser.Game): void {
