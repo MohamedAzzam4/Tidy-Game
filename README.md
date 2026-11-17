@@ -8,8 +8,9 @@ watch the room transform.
 
 ![Completed room](docs/screenshot-complete.png)
 
-**Play online:** https://mohamedazzam4.github.io/Tidy-Game/ — every push to
-`main` rebuilds and republishes the site via GitHub Actions.
+**Play online:** https://mohamedazzam4.github.io/Tidy-Game/ — pushes to
+`main` or the `cozy-corner-upgrade` branch rebuild and republish the site
+via GitHub Actions.
 
 ## Run it
 
