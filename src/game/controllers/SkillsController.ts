@@ -374,7 +374,9 @@ export class SkillsController {
     this.clearGuide();
     this.matchScanRingsGfx.clear();
     if (window.location.search.includes('autotest')) {
-      console.log(`[repair] opening tape ${id}, Repair added=${this.scene.scene.settings.manager.keys?.includes?.('Repair') ?? 'n/a'}`);
+      const mgr = this.scene.scene.settings as unknown as { manager?: { keys?: unknown } };
+      console.log(`[repair] opening tape ${id}`);
+      void mgr;
     }
     this.scene.scene.pause('Game');
     this.scene.scene.launch('Repair', { tapeId: id });
