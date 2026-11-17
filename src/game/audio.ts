@@ -59,7 +59,12 @@ class AudioEngine {
     }
   }
 
-  private now(): number { return this.ctx ? this.ctx.currentTime : 0; }
+  private now(): number {
+    // suspended contexts freeze currentTime at 0 (e.g. headless without a user
+    // gesture) — fall back to wall-clock so pacing/polyphony stays sane
+    if (this.ctx && this.ctx.state === 'running') return this.ctx.currentTime;
+    return performance.now() / 1000;
+  }
 
   /** variation helpers: ±1 semitone (~6%) and ±2 dB, no immediate repeats */
   private vary(): { rate: number; gain: number } {

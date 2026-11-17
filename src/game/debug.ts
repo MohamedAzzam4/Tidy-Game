@@ -144,7 +144,7 @@ export function installDebug(game: Phaser.Game): void {
       return v ? { x: Math.round(v.container.x * 10) / 10, y: Math.round(v.container.y * 10) / 10 } : null;
     },
     storageOk: () => !!getScene()?.storageOk,
-    audioRecent: () => getScene() ? audioRecentNames() : [],
+    audioRecent: () => audioRecentNames(),
     completed: () => getScene()?.completionShown ?? false,
     resize: (w, h) => getScene()?.resizeForTest(w, h),
     scanInfo: () => {

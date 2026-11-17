@@ -71,6 +71,26 @@ export class RepairScene extends Phaser.Scene {
   }
 
   create(): void {
+    // Phaser re-uses a stopped scene instance: reset every mutable field
+    // (a previous rewind repair must not leave done=true for the next repair)
+    this.success = false;
+    this.done = false;
+    this.reelAngle = 0;
+    this.windProgress = 0;
+    this.lastSqueak = 0;
+    this.lastPointerAngle = null;
+    this.phase = 'peel';
+    this.peelDragStart = null;
+    this.peelDist = 0;
+    this.wipeDist = 0;
+    this.draggingSticker = false;
+    this.pressStart = 0;
+    this.coverage = new Set();
+    this.rubDist = 0;
+    this.lastTrail = null;
+    this.lastRubSound = 0;
+    this.pointerDown = false;
+
     const W = this.scale.width;
     const H = this.scale.height;
     this.cx = W / 2;
