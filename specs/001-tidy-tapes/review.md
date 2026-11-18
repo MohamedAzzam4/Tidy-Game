@@ -1,60 +1,41 @@
-# Tidy Tapes — Review note (analyze step, manual) — v3
+# Tidy Tapes — Review (review.md) — v4 full-board art + hover rollout
 
-**Feature:** 001-tidy-tapes · Reviewer: build agent · Date: 2026-11-18 (UTC+8)
+## Review pass over spec.md + plan.md (before implementation)
 
-## Process honesty
+**Requirement coverage check (handoff → spec):**
+- §1 template poses/layers/tint rules → F1 + plan step 1–2. ✓
+- §1 "visual replacement only" (footprints/hitboxes/animation preserved) → F1 hard constraint +
+  A2 regression via existing §1 tests. ✓
+- §2 cabinets at compact proportions, geometry revert of the tall pilot → F2 + plan step 3. The
+  brief's "do not change bank placement" is read as bank MEMBERSHIP (north/left/right), not the
+  pilot-era internal respacing — the tall portrait footprint itself is explicitly outlawed by the
+  brief ("do not fit the gameplay to a tall portrait image"), so unit 12 returns to the standard
+  footprint and the right bank returns to the uniform pitch. Capacities/counts/matching untouched.
+- §2 background/lighting/HUD exclusion → F2 + plan step 3. ✓
+- §2 tools keep gestures/anchors → F2 + plan step 5. ✓
+- §3 nudge everywhere with all guards → F3 + plan step 4. ✓
+- §4 order (baseline → cassette → board → tools separate) + evidence list → F4 + plan step 6. ✓
 
-- Spec Kit CLI still not installed (as in v1/v2); v3 spec/plan/tasks + this review are manual.
-- Art pack extracted and README.md + scene-layout.json read in full before planning. The
-  reference mockups are visual targets only (never loaded as textures).
-- The v2 "20/20" result is treated as a baseline, not proof: every v3 case is reproduced on
-  the current build first (e.g. the oversized-after-unshelving tape confirmed by code reading:
-  the insert tween's `scaleX:{from:1}` on a 208×144 face texture working at 0.5 scale).
+**Decisions recorded:**
+1. Canonical texture keys keep the NEW art; the pre-v4 look stays available under `legacy-*` keys
+   behind the existing settings toggle (key `pilotArt` kept for save compatibility, UI label
+   "new art") — this preserves the required before/after comparator without duplicating consumers.
+2. Unit 12 geometry reverts to compact 240×184; right bank returns to uniform 220 pitch. Old saves
+   survive via resolveSaveOverlaps (existing, tested path for moved racks).
+3. Spine art is a restyle at the fixed 16×28 slot scale (the reference's 1:3.5 tall proportion
+   belongs to the retired portrait cabinet; slots are frozen).
+4. The turn pose ships for ALL units in new-art mode; legacy mode keeps the old crossfade.
 
-## Ponytail check — smallest working change per requirement
+**Risk review (plan §Risks):** key-swap audit, save migration, turn feel, sandbox flakes — all
+carry explicit checks in tasks.md. No unresolved design questions; proceeding to C2.
 
-- B1 solved by a pose module + tween math fix, not a rearchitecture of drag/drop.
-- B2 is one constant (all geometry derives from `unitPos`), not a camera trick.
-- B3/B9 confined to one corner with a reversible toggle; no engine or map replacement.
-- B4 is an edge-triggered checker hooked at the existing insert-complete beat.
-- B5 keeps the v2 pointer pipeline and adds threshold arming + a click-deferral window.
-- B6–B8 are localized to UIScene / GameScene.onRepairClosed / RepairScene.rewind.
+## Checkpoint reviews (filled as work lands)
 
-## Conflicting-input resolution (spec ↔ playtest doc ↔ v2 behavior)
+### C2 — cassette template
+- (pending)
 
-1. **Right-drag semantics.** v2 pans with right-drag; v3 §5 makes right-drag the marquee after
-   unlock and says "it does not pan". Resolution: after unlock → marquee only; before unlock →
-   right-drag pans (v2 control preserved, no selection possible, satisfying "must not create a
-   selection").
-2. **The "skill that currently uses double-click".** In v2 no *skill* is double-click-bound;
-   the double-click gesture is the defective-tape repair opener. It is the affected binding:
-   rebinded to `R` (unused; G already = Match Gather as the doc prefers), old binding removed,
-   Help/panel updated, bench drag-in kept as the second repair route.
-3. **Double-click vs power clicks.** A tape click while Match Gather is armed must not be
-   swallowed by the tray shortcut and vice versa. Resolution: single-click actions are
-   deferred ~240 ms; the second click of a double-click cancels them, so a double-click never
-   triggers a skill, and skills still fire on deliberate single clicks.
-4. **Milestone chime vs verify-only chime (v2).** The doc explicitly changes the rule at the
-   milestone level: Tiny Chime now also fires automatically on correct row/cabinet completion;
-   individual right/wrong insertion stays silent. Misfiled-full rows stay silent by design.
-5. **Walnut cabinet vs map preservation.** One side-bank unit is respaced to host the taller
-   walnut cabinet (logical row ids/capacities/groups unchanged; row 48 = teal star row either
-   way; saves keep working via the overlap fixup). This is the minimal honest integration of
-   "one playable corner" — the alternative (squeezing the 835×1252 art into 240×184) would
-   distort the art, which the README forbids.
-6. **Table surface.** Full-board walnut reskin would violate "keep the rest of the board
-   intact"; a bounded walnut inlay patch around the pilot corner uses the pack's surface/trim
-   without reskinning the table.
-7. **Seated spine sizes differ between cabinets** (fallback 16×28 vs walnut-row seat geometry)
-   — accepted per §1's "separate visual size for a seated spine" and README's "store each
-   pose's intended display dimensions explicitly".
-8. **Row/cabinet milestone + hidden correctness.** The pulse/chime only confirms fully-correct
-   rows, which is a deliberate leak at milestone granularity requested by the doc; individual
-   placements remain feedback-identical.
+### C3 — cabinets + background + hover
+- (pending)
 
-## Verification plan reminder
-
-Every fix reproduced → implemented → re-tested through real input paths (synthetic DOM events
-through Phaser + agent-browser E2E on the dev server); audio asserts are event-level (headless
-cannot hear); screenshots re-inspected visually; honest final report separates tested /
-asserted / not-tested.
+### C4 — tools + verification
+- (pending)
