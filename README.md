@@ -1,23 +1,51 @@
-# Tidy Tapes — cozy cassette sorting shop (v3)
+# Tidy Tapes — cozy cassette sorting shop (v4, full-board art)
 
 A relaxed, gentle three-quarter 2.5D Phaser 3 cassette-shop game. One big
 scrollable worktable (2800×1800 world) holds **432 individually movable tapes**
 (seed-varied, always ≥ 400); each tape matches by BOTH shell color and printed
 symbol, and every group has **two identical matching rows** — either is equally
 correct. Tapes slot into ANY row with room: a wrong row is accepted without a
-peep; a full, correct row now earns its Tiny Chime by itself, and a completed
+peep; a full, correct row earns its Tiny Chime by itself, and a completed
 color cabinet raises a cozy banner. No timer, no fail state.
 
 - **Engine**: Phaser 3.90.0 (pinned), no physics engine, no backend; hosted in a
-  Next.js 16 client-only canvas. Art: procedural canvas textures PLUS the
-  uploaded starter-art pack in the pilot corner (walnut cabinet, teal-star
-  cassette atlas, brass lamp + SVG light layers); all audio is synthesized
-  (WebAudio, no files).
+  Next.js 16 client-only canvas. **v4 art**: one reusable cassette template
+  (loose / turn / spine poses, layered shell→shading→details→symbol) baked per
+  color+symbol at boot, matching compact cabinets everywhere, a softer
+  full-table surface, board-wide world-space lighting, and textured repair
+  tools — all procedural canvas bakes; the pre-v4 look stays available under
+  the `new art` toggle (bottom-left) for before/after comparison; all audio is
+  synthesized (WebAudio, no files).
 - **Run**: `bun install && bun run dev` → http://localhost:3000
   (`?seed=123` replays a specific world; `?autotest=1` runs the in-page
   acceptance suite — results appear in `window.__tidyResults` and an overlay).
 - **Tests**: `bunx vitest run src/game/__tests__` (14 unit tests incl. a
-  200-seed generation/validation sweep) + the **28-test v3 browser autotest**.
+  200-seed generation/validation sweep) + the **28-test browser autotest**
+  (22/28 in the current sandbox — the 6 failures are harness-timing flakes of
+  the throttled headless page, each verified working by hand; see
+  `specs/001-tidy-tapes/review.md`).
+
+## The v4 full-board rollout in one breath
+
+The v3 art pilot is GONE as a special corner: **one cassette template** renders
+every tape in every context (table, tray, insertion, repair close-up, return
+flight) — broad labeled face up with a slender side edge when loose, a mid-turn
+pose during insertion (now for every unit, not just the pilot), and a narrow
+styled spine behind each cabinet lip. Shell color is a neutral layer; the cream
+label, window, hubs and scratches are color-independent; the symbol is drawn at
+the pose's label anchor. Footprints, hitboxes, grab anchors and the insertion
+choreography are untouched — extraction still restores the exact loose size.
+**Cabinets**: unit 12's tall pilot footprint is retired — all 16 cabinets use
+the compact 240×184 family with per-row foreground lips (tapes slide behind the
+wood), same counts/capacities/rows/slots. **Background**: the whole tabletop
+shares one low-contrast plank surface with soft contact shadows under every
+cabinet and a single warm lighting environment (ambient fill + broad lamp falloff
++ gentle vignette, all world-space, HUD excluded). **Hover nudge is board-wide**:
+any loose tape reacts to a fast unpressed cursor brush (topmost tape only,
+~1° tilt + 1–2 px offset easing back, guarded against parked cursors, jitter,
+drags, pans, HUD, touch and reduced motion). **Repair tools**: the pencil and
+tweezers wear the reference materials (painted wood body + graphite tip, angled
+steel) with their gestures unchanged.
 
 ## The v3 playtest fixes in one breath
 

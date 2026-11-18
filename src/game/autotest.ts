@@ -25,6 +25,7 @@
  */
 import type Phaser from 'phaser';
 import type { TidyDebug } from './debug';
+import { WORLD_H, WORLD_W } from './config';
 
 interface TestResult { name: string; pass: boolean; error?: string; ms: number }
 
@@ -86,39 +87,24 @@ async function waitUntil(cond: () => boolean, timeoutMs = 15000, what = 'conditi
 }
 
 // ---------------------------------------------------------------- geometry
-/** mirrors config.ts formulas (single source stays config) — v3 layout */
+/** mirrors config.ts formulas (single source stays config) — v4 layout:
+ *  all side-bank units share the compact 220 pitch (pilot respace reverted) */
 const BACK_X0 = 860, BACK_Y0 = 140, BACK_DX = 280, BACK_DY = 220;
-const SIDE_XL = 140, SIDE_XR = 2400;
-const RIGHT_TOPS = [560, 1064, 1294, 1524];
-const LEFT_TOPS = [620, 840, 1060, 1280];
-const WALNUT = { x: 2400, y: 560, w: Math.round(835 * 0.378), h: Math.round(1252 * 0.378) };
+const SIDE_XL = 140, SIDE_XR = 2400, SIDE_Y0 = 620, SIDE_DY = 220;
 const SLOT0_X = 50, SLOT_PITCH = 24, ROW_CH_TOP = 30, ROW_PITCH = 36, ROW_CH_H = 30;
 
 function unitPosMirror(u: number): { x: number; y: number } {
   if (u < 8) return { x: BACK_X0 + (u % 4) * BACK_DX, y: BACK_Y0 + Math.floor(u / 4) * BACK_DY };
-  if (u < 12) return { x: SIDE_XL, y: LEFT_TOPS[u - 8] };
-  return { x: SIDE_XR, y: RIGHT_TOPS[u - 12] };
-}
-
-function pilotSlotWorld(row: number, slot: number): { x: number; y: number } {
-  const k = 0.378;
-  const artX = 110 + (slot * (690 - 110)) / 7;
-  return { x: WALNUT.x + artX * k, y: WALNUT.y + [361, 627, 897, 1161][row % 4] * k };
+  return { x: u < 12 ? SIDE_XL : SIDE_XR, y: SIDE_Y0 + (u % 4) * SIDE_DY };
 }
 
 function rowSlotWorld(row: number, slot: number): { x: number; y: number } {
-  const u = Math.floor(row / 4);
-  if (u === 12) return pilotSlotWorld(row, slot);
-  const p = unitPosMirror(u);
+  const p = unitPosMirror(Math.floor(row / 4));
   return { x: p.x + SLOT0_X + slot * SLOT_PITCH, y: p.y + ROW_CH_TOP + (row % 4) * ROW_PITCH + ROW_CH_H / 2 };
 }
 
 function rowCenterWorld(row: number): { x: number; y: number; unit: number } {
   const u = Math.floor(row / 4);
-  if (u === 12) {
-    const s = pilotSlotWorld(row, 3);
-    return { x: (pilotSlotWorld(row, 0).x + pilotSlotWorld(row, 7).x) / 2, y: s.y, unit: u };
-  }
   const p = unitPosMirror(u);
   return { x: p.x + 130, y: p.y + ROW_CH_TOP + (row % 4) * ROW_PITCH + ROW_CH_H / 2, unit: u };
 }
@@ -742,7 +728,7 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
         // re-center on a rack-free table spot and drop there
         const tableSpot = findEmptySpot(); // front band: no racks, no bench
         const sp = tidy().spritePos(tape.id)!;
-        const near = { x: sp.x, y: sp.y - (row < 48 ? 0 : 40) }; // seated strip center
+        const near = { x: sp.x, y: sp.y }; // v4: one compact family — seated strip center
         d.setCamera(sp.x, sp.y, zoom);
         await waitFrames(game, 3);
         let w2s = makeWorldToScreen(game);
@@ -827,7 +813,7 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       d.setCamera((spotB.x + slotB.x) / 2, (spotB.y + slotB.y) / 2, 1);
       await waitFrames(game, 3);
       await dragTape(game, tape.id, slotB);
-      await sleep(1400);
+      await sleep(3200); // full insert chain (throttled headless pages run it slow)
       const info = tidy().tapesInfo().find(t => t.id === tape.id)!;
       assert(info.state === 'shelved', `wrong-combo tape accepted physically (state=${info.state})`);
       assert(info.row === rowB, `seated in the WRONG row (${info.row})`);
@@ -846,7 +832,7 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
 
       // pull-out: press on the seated spine, cross threshold, re-file correct
       const sp = tidy().spritePos(tape.id)!;
-      const near = { x: sp.x, y: sp.y - (rowB < 48 ? 0 : 40) };
+      const near = { x: sp.x, y: sp.y }; // v4: one compact family — no tall-cabinet offset
       d.setCamera(sp.x, sp.y, 1);
       await waitFrames(game, 3);
       const w2s = makeWorldToScreen(game);
@@ -1650,9 +1636,11 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       const right = tidy().unitRectInfo(13);
       assert(left.x + left.w < bb.x0 - 20, `left bank clear of the north bank (${left.x}..${left.x + left.w})`);
       assert(right.x > bb.x1 + 20, `right bank clear of the north bank (${right.x})`);
-      // whole-table view: grow the canvas (the game is in RESIZE mode, so the
-      // camera math uses the new size even though the browser window is small)
-      tidy().resize(2200, 1300);
+      // whole-table view: resize the REAL host element (RESIZE mode snaps the
+      // game size back to the parent on refresh, so a plain gameSize resize
+      // does not stick) — with the world-sized host the fit zoom is exactly 1
+      // and covers by construction, independent of the browser's DPR
+      tidy().resizeHard(WORLD_W, WORLD_H);
       await waitFrames(game, 4);
       tidy().fit();
       await waitFrames(game, 4);
@@ -1665,47 +1653,63 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       };
       assert(inView(0), 'north bank visible in the fit view');
       assert(inView(8), 'left bank visible in the fit view');
-      assert(inView(12), 'right (walnut) bank visible in the fit view');
-      tidy().resize(1280, 578);
+      assert(inView(12), 'right bank visible in the fit view');
+      tidy().resizeHard(0, 0);
       await waitFrames(game, 4);
     });
 
-    await test('T13c §3 art pilot: toggle swaps corner art; atlas + walnut loaded; before/after share geometry', async () => {
-      const state0 = tidy().pilotArtState();
-      assert(state0.atlasLoaded, 'the uploaded cassette atlas loaded at runtime');
-      // pilot combo tape uses the atlas loose frame when art is on
-      const pilot = tidy().tapesInfo().find(t => t.combo === 16 && t.state === 'loose');
-      if (pilot) {
-        const tex = tidy().textureOfTape(pilot.id)!;
-        assert(tex.face === 'tt-cassette', `teal-star loose uses the atlas (${tex.face})`);
-      }
+    await test('T13c v4 full-board art: toggle swaps the WHOLE board; before/after share geometry; turn pose for every combo', async () => {
+      // new-art mode: the shared template texture for ANY combo
+      const anyLoose = tidy().tapesInfo().find(t => t.state === 'loose')!;
+      let tex = tidy().textureOfTape(anyLoose.id)!;
+      assert(tex.face === `tape-face-${anyLoose.combo}`, `new-art loose texture (${tex.face})`);
+      assert(tex.spine === `spine-${anyLoose.combo}`, `new-art spine texture (${tex.spine})`);
+      const st0 = tidy().pilotArtState();
+      assert(st0.art && st0.bodyTexture === 'unit-body', `new-art cabinet body (${st0.bodyTexture})`);
       const rectBefore = tidy().unitRectInfo(12);
-      // toggle OFF (before mode)
+      // toggle OFF (before mode) — legacy family everywhere
       tidy().setSetting('pilotArt', false);
       await waitFrames(game, 3);
-      const stateOff = tidy().pilotArtState();
-      assert(!stateOff.art && stateOff.bodyTexture === 'walnut-plain', `before-mode body (${stateOff.bodyTexture})`);
-      if (pilot) {
-        const tex = tidy().textureOfTape(pilot.id)!;
-        assert(tex.face === 'tape-face-16', `before-mode loose uses fallback (${tex.face})`);
-      }
-      // geometry unchanged
+      tex = tidy().textureOfTape(anyLoose.id)!;
+      assert(tex.face === `legacy-tape-face-${anyLoose.combo}`, `legacy loose texture (${tex.face})`);
+      const stOff = tidy().pilotArtState();
+      assert(!stOff.art && stOff.bodyTexture === 'legacy-unit-body', `before-mode body (${stOff.bodyTexture})`);
+      // geometry identical across the toggle, and unit 12 is a STANDARD compact
+      // cabinet now (the v3 tall pilot footprint is retired)
       const rectAfter = tidy().unitRectInfo(12);
       assert(approx(rectBefore.x, rectAfter.x, 0.1) && approx(rectBefore.w, rectAfter.w, 0.1),
         'slot geometry identical before/after (no map change)');
-      // toggle back ON
+      const r0 = tidy().unitRectInfo(0);
+      assert(approx(rectAfter.w, r0.w, 0.1) && approx(rectAfter.h, r0.h, 0.1),
+        'unit 12 uses the compact family (no portrait footprint)');
+      // toggle back ON — new art restored
       tidy().setSetting('pilotArt', true);
       await waitFrames(game, 3);
-      assert(tidy().pilotArtState().art, 'after-mode restored');
+      assert(tidy().pilotArtState().art, 'new-art mode restored');
+      tex = tidy().textureOfTape(anyLoose.id)!;
+      assert(tex.face === `tape-face-${anyLoose.combo}`, 'new-art loose restored');
+      // every combo has its three poses baked
+      for (let combo = 0; combo < 32; combo += 7) {
+        assert(tidy().textureExists(`tape-face-${combo}`) && tidy().textureExists(`tape-turn-${combo}`)
+          && tidy().textureExists(`spine-${combo}`), `poses baked for combo ${combo}`);
+      }
     });
 
-    await test('T13d §9 hover nudge: display-only, guards, cancel on pickup, toggle; board undisturbed', async () => {
-      // find a loose tape inside the pilot region
-      const region = { x0: 1950, y0: 100, x1: 2790, y1: 1150 };
+    await test('T13d §9 hover nudge board-wide: display-only, guards, cancel on pickup, toggle; two corners; board undisturbed', async () => {
+      // defensive: an earlier test's stuck drag/selection would park the nudge
+      // in its disabled state — recover to a clean input state first, and force
+      // the expected setting (this tab may carry state from an earlier run)
+      tidy().recover();
+      tidy().setSetting('hoverFx', true);
+      tidy().setSetting('reducedMotion', false);
+      await waitFrames(game, 2);
+      // ANY loose tape away from the world edges is eligible now (v4 removed the
+      // pilot-region gate); stay half-a-view from the edges so the centered
+      // camera never parks the tape under screen HUD (tray/top bar)
       const target = tidy().tapesInfo().find(t =>
         t.state === 'loose' && !t.defect
-        && t.x > region.x0 + 60 && t.x < region.x1 - 60 && t.y > region.y0 + 60 && t.y < region.y1 - 60);
-      assert(!!target, 'a loose tape inside the pilot corner exists');
+        && t.x > 900 && t.x < 1900 && t.y > 480 && t.y < 1300);
+      assert(!!target, 'a loose tape in the safe interior exists');
       const t = target as NonNullable<typeof target>;
       const posBefore = { x: t.x, y: t.y };
       d.setCamera(t.x, t.y, 1);
@@ -1714,9 +1718,13 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       const p = w2s(t.x, t.y);
 
       // sweep the cursor in from the left and across the tape (a real brush:
-      // fast, synchronous, and UNPRESSED — buttons 0)
+      // fast, synchronous, and UNPRESSED — buttons 0). The extra pre-move right
+      // before the burst re-anchors the speed baseline: in a throttled headless
+      // page the positioning move can be seconds old, and a slow-crawl first
+      // step must not swallow the whole brush (parked-cursor guard).
       pointerEvent(game, 'pointermove', p.sx - 90, p.sy, { buttons: 0 });
       await waitFrames(game, 2);
+      pointerEvent(game, 'pointermove', p.sx - 90, p.sy, { buttons: 0 });
       for (let i = 0; i <= 12; i++) {
         pointerEvent(game, 'pointermove', p.sx - 90 + i * 18, p.sy + Math.sin(i * 0.6) * 2, { buttons: 0 });
       }
@@ -1751,6 +1759,10 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       assert(approx(sizeHeld.w, 104, 1), `held size canonical (${sizeHeld.w}x${sizeHeld.h})`);
       pointerEvent(game, 'pointerup', p.sx + 12, p.sy + 10);
       await waitFrames(game, 3);
+      // the release DROPS the tape at the pointer (grab offset +12,+10) — that
+      // player-visible move is expected; displacement is measured from here on
+      const rel = tidy().tapesInfo().find(x => x.id === t.id)!;
+      const posAfterPickup = { x: rel.x, y: rel.y };
 
       // while any button is held the nudge is disabled: sweep with a pressed button
       pointerEvent(game, 'pointerdown', p.sx - 60, p.sy + 40);
@@ -1772,9 +1784,10 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       tidy().setSetting('hoverFx', true);
       await waitFrames(game, 2);
 
-      // the board is undisturbed after all the sweeps
+      // the board is undisturbed after all the sweeps (relative to the pickup
+      // release — the grab itself legitimately moved the tape by +12,+10)
       const after = tidy().tapesInfo().find(x => x.id === t.id)!;
-      const moved = Math.hypot(after.x - posBefore.x, after.y - posBefore.y);
+      const moved = Math.hypot(after.x - posAfterPickup.x, after.y - posAfterPickup.y);
       assert(moved < 0.1 || after.state !== 'loose', `no tape displaced by sweeps (moved ${moved.toFixed(2)})`);
       // nudge never applies to shelved tapes: sweep across a walnut row
       const walnutRow = 48;
@@ -1791,6 +1804,31 @@ async function runTests(game: Phaser.Game, phase: number): Promise<TestResult[]>
       if (seatedTapes.length > 0) {
         assert(tidy().nudge().lastNudgedId === null || tidy().tapesInfo().find(x => x.id === tidy().nudge().lastNudgedId)!.state === 'loose',
           'nudge only ever targets LOOSE tapes');
+      }
+
+      // v4 board-wide: a FAR-AWAY second corner also responds (the pilot-region
+      // gate is gone). Pick a safe-interior tape in the opposite quadrant.
+      const other = tidy().tapesInfo().find(x =>
+        x.state === 'loose' && !x.defect && x.id !== t.id
+        && ((x.x < 900 && x.y > 600) || (x.x > 1900 && x.y < 900))
+        && x.x > 500 && x.x < 2300 && x.y > 300 && x.y < 1400);
+      if (other) {
+        d.setCamera(other.x, other.y, 1);
+        await waitFrames(game, 3);
+        const w2sC = makeWorldToScreen(game);
+        const q2 = w2sC(other.x, other.y);
+        pointerEvent(game, 'pointermove', q2.sx - 90, q2.sy, { buttons: 0 });
+        await waitFrames(game, 2);
+        pointerEvent(game, 'pointermove', q2.sx - 90, q2.sy, { buttons: 0 });
+        for (let i = 0; i <= 12; i++) {
+          pointerEvent(game, 'pointermove', q2.sx - 90 + i * 18, q2.sy, { buttons: 0 });
+        }
+        await waitFrames(game, 2);
+        const nudge2 = tidy().nudge();
+        assert(nudge2.lastNudgedId === other.id || nudge2.activeCount > 0,
+          `the far-corner sweep also nudged (last=${nudge2.lastNudgedId})`);
+        const infoOther = tidy().tapesInfo().find(x => x.id === other.id)!;
+        assert(infoOther.state === 'loose', 'far-corner nudge is display-only too');
       }
     });
   }

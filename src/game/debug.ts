@@ -57,6 +57,8 @@ export interface TidyDebug {
   audioRecent(): string[];
   completed(): boolean;
   resize(w: number, h: number): void;
+  /** v4: resize the real host element + refresh, so RESIZE mode keeps the size */
+  resizeHard(w: number, h: number): void;
   scanInfo(): { target: number | null; count: number };
   sceneInfo(): Record<string, { active: boolean; paused: boolean; sleeping: boolean }>;
   spritePos(id: number): { x: number; y: number } | null;
@@ -72,6 +74,7 @@ export interface TidyDebug {
   returning(): boolean;
   bankBounds(): { x0: number; x1: number; center: number };
   unitRectInfo(u: number): { x: number; y: number; w: number; h: number };
+  textureExists(key: string): boolean;
   textureOfTape(id: number): { face: string; spine: string } | null;
   pilotArtState(): { art: boolean; atlasLoaded: boolean; bodyTexture: string };
   recover(): void;
@@ -266,6 +269,31 @@ export function installDebug(game: Phaser.Game): void {
     audioRecent: () => audioRecentNames(),
     completed: () => getScene()?.completionShown ?? false,
     resize: (w, h) => getScene()?.resizeForTest(w, h),
+    resizeHard: (w, h) => {
+      const s = getScene();
+      if (!s) return;
+      const host = document.querySelector('[aria-label="Tidy Tapes game canvas"]') as HTMLElement | null;
+      if (host) {
+        if (w > 0 && h > 0) {
+          host.style.width = `${w}px`;
+          host.style.height = `${h}px`;
+        } else {
+          host.style.width = '100vw';
+          host.style.height = '100vh';
+        }
+      }
+      // RESIZE mode derives gameSize from the CACHED parentSize on every
+      // refresh — re-read the parent bounds synchronously, then resize so the
+      // two agree and the size sticks
+      const sm = s.game.scale;
+      if (w > 0 && h > 0) {
+        sm.getParentBounds();
+        sm.resize(w, h);
+      } else {
+        sm.getParentBounds();
+        sm.refresh();
+      }
+    },
     scanInfo: () => {
       const s = getScene();
       return { target: s?.skills.lastScanTarget ?? null, count: s?.skills.lastScanMatchCount ?? 0 };
@@ -312,6 +340,7 @@ export function installDebug(game: Phaser.Game): void {
       return { x0: Math.round(x0), x1: Math.round(x1), center: Math.round((x0 + x1) / 2) };
     },
     unitRectInfo: (u) => unitRect(u),
+    textureExists: (key: string) => !!getScene()?.textures.exists(key),
     textureOfTape: (id) => {
       const s = getScene();
       const v = s?.tapeViews.get(id);
@@ -320,10 +349,11 @@ export function installDebug(game: Phaser.Game): void {
     },
     pilotArtState: () => {
       const s = getScene();
+      const body = s?.unitArt[0]?.body as unknown as { texture?: { key?: string } } | undefined;
       return {
-        art: !!s && (s as unknown as { pilotViews: { body: { texture: { key: string } } } | null }).pilotViews?.body.texture.key === 'tt-cabinet',
+        art: !!s && body?.texture?.key === 'unit-body',
         atlasLoaded: !!s?.textures.exists('tt-cassette'),
-        bodyTexture: (s as unknown as { pilotViews: { body: { texture: { key: string } } } | null })?.pilotViews?.body.texture.key ?? '',
+        bodyTexture: body?.texture?.key ?? '',
       };
     },
     // failure recovery: one failing test must never poison the next one

@@ -613,34 +613,124 @@ export function buildProps(scene: Phaser.Scene): void {
 }
 
 // ----------------------------------------------------------------- tools (repair)
-export function buildTools(scene: Phaser.Scene): void {
-  {
-    const key = 'tool-pencil';
-    const W = 30, H = 170;
-    const ctx = canvasTex(scene, key, W, H);
-    ctx.fillStyle = '#e8b937';
-    ctx.fillRect(5, 22, 18, 130);
-    ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 2; ctx.strokeRect(5, 22, 18, 130);
-    ctx.fillStyle = '#f6efdd'; ctx.beginPath();
-    ctx.moveTo(5, 152); ctx.lineTo(14, 170); ctx.lineTo(23, 152); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#3b2f2f'; ctx.beginPath();
-    ctx.moveTo(11, 164); ctx.lineTo(14, 170); ctx.lineTo(17, 164); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#d97b8f'; ctx.fillRect(5, 0, 18, 22);
-    ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(7, 26, 4, 122);
-    finish(scene, key);
+// v4: textured repair tools from the handoff references (graphite pencil,
+// angled steel tweezers), sharing the cassette materials and light direction.
+// Both references are drawn horizontally (tip on the right, 220x72 art space)
+// and baked rotated so the tip points DOWN — the repair scene's origin
+// convention (0.5,1) and gesture code are untouched.
+
+function toolBakeTransform(ctx: CanvasRenderingContext2D, W: number, H: number): void {
+  // ref (x,y) -> canvas (-y*H/220 + W, x*H/220): tip (x≈210) lands at the bottom
+  const k = H / 220;
+  ctx.setTransform(0, k, -k, 0, W, 0);
+}
+
+/** pencil paint gradient in reference space (objectBoundingBox of the body) */
+function pencilGrad(ctx: CanvasRenderingContext2D): CanvasGradient {
+  const g = ctx.createLinearGradient(0, 24, 0, 50);
+  g.addColorStop(0, '#ffd66d');
+  g.addColorStop(0.45, '#eea943');
+  g.addColorStop(1, '#bc6f32');
+  return g;
+}
+function steelGrad(ctx: CanvasRenderingContext2D): CanvasGradient {
+  const g = ctx.createLinearGradient(0, 22, 0, 58);
+  g.addColorStop(0, '#eaeee9');
+  g.addColorStop(0.48, '#899d99');
+  g.addColorStop(1, '#46615f');
+  return g;
+}
+
+function buildToolPencil(scene: Phaser.Scene): void {
+  const key = 'tool-pencil';
+  const W = 34, H = 118; // ~2x of the 17x58 display the repair scene uses
+  const ctx = canvasTex(scene, key, W, H);
+  toolBakeTransform(ctx, W, H);
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#65432d';
+  ctx.lineWidth = 1.4;
+  // hex body (top face + shaded lower face) in the paint gradient
+  ctx.beginPath();
+  ctx.moveTo(19, 29); ctx.lineTo(175, 29); ctx.lineTo(191, 34);
+  ctx.lineTo(175, 39); ctx.lineTo(19, 39); ctx.closePath();
+  ctx.fillStyle = pencilGrad(ctx); ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(24, 39); ctx.lineTo(177, 39); ctx.lineTo(177, 47); ctx.lineTo(24, 47); ctx.closePath();
+  ctx.fillStyle = '#c6803d'; ctx.fill(); ctx.stroke();
+  // length highlight catching the key light
+  ctx.strokeStyle = '#ffe395'; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(29, 30.5); ctx.lineTo(172, 30.5); ctx.stroke();
+  // wood cone + graphite tip (the working tip, ref x=210)
+  ctx.strokeStyle = '#65432d'; ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.moveTo(175, 29); ctx.lineTo(207, 37); ctx.lineTo(177, 47);
+  ctx.lineTo(175, 40); ctx.lineTo(180, 36); ctx.closePath();
+  ctx.fillStyle = '#eaca95'; ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(200, 35); ctx.lineTo(210, 37.5); ctx.lineTo(201, 40.7); ctx.closePath();
+  ctx.fillStyle = '#383130'; ctx.fill();
+  // eraser + ferrule with crimp lines
+  ctx.beginPath();
+  ctx.roundRect ? ctx.roundRect(10, 28, 16, 20, 4) : ctx.rect(10, 28, 16, 20);
+  ctx.fillStyle = '#c78179'; ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.rect(23, 28, 17, 20);
+  ctx.fillStyle = '#9f9b88'; ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = '#eee0ad'; ctx.lineWidth = 1.1;
+  ctx.beginPath();
+  ctx.moveTo(28, 30); ctx.lineTo(28, 46);
+  ctx.moveTo(33, 30); ctx.lineTo(33, 46);
+  ctx.stroke();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  finish(scene, key);
+}
+
+function buildToolTweezers(scene: Phaser.Scene): void {
+  const key = 'tool-tweezers';
+  const W = 52, H = 158; // rendered 1:1 by the repair scene (tip at origin 0.5,1)
+  const ctx = canvasTex(scene, key, W, H);
+  toolBakeTransform(ctx, W, H);
+  ctx.lineJoin = 'round';
+  // upper arm (steel gradient) — ring at the left, angled head to the tip
+  ctx.strokeStyle = '#384742';
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.moveTo(18, 24);
+  ctx.quadraticCurveTo(6, 24, 7, 32);
+  ctx.quadraticCurveTo(7, 36, 14, 38);
+  ctx.lineTo(144, 48); ctx.lineTo(174, 57); ctx.lineTo(193, 50);
+  ctx.lineTo(197, 42); ctx.lineTo(176, 46); ctx.lineTo(145, 34);
+  ctx.closePath();
+  ctx.fillStyle = steelGrad(ctx); ctx.fill(); ctx.stroke();
+  // lower arm (lighter face) with the working tip
+  ctx.beginPath();
+  ctx.moveTo(16, 23);
+  ctx.quadraticCurveTo(9, 23, 8, 28);
+  ctx.lineTo(141, 30); ctx.lineTo(171, 44); ctx.lineTo(195, 45);
+  ctx.lineTo(200, 40); ctx.lineTo(174, 34); ctx.lineTo(143, 20);
+  ctx.closePath();
+  ctx.fillStyle = '#a8b8b1'; ctx.fill(); ctx.stroke();
+  // edge highlights along both arms
+  ctx.strokeStyle = '#edede4'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(24, 26); ctx.lineTo(126, 26); ctx.lineTo(153, 35);
+  ctx.moveTo(132, 43); ctx.lineTo(172, 54); ctx.lineTo(190, 48);
+  ctx.stroke();
+  // grip ridges near the ring end
+  ctx.strokeStyle = '#52635e'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < 5; i++) {
+    const x = 51 + i * 7;
+    ctx.moveTo(x, 27); ctx.lineTo(x - 2, 33);
   }
-  {
-    const key = 'tool-tweezers';
-    const W = 40, H = 170;
-    const ctx = canvasTex(scene, key, W, H);
-    ctx.strokeStyle = '#c8cdd4'; ctx.lineWidth = 6; ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.moveTo(14, 10); ctx.lineTo(10, 150); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(26, 10); ctx.lineTo(30, 150); ctx.stroke();
-    ctx.strokeStyle = '#9aa0a8'; ctx.lineWidth = 8;
-    ctx.beginPath(); ctx.moveTo(16, 0); ctx.lineTo(13, 24); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(24, 0); ctx.lineTo(27, 24); ctx.stroke();
-    finish(scene, key);
-  }
+  ctx.stroke();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  finish(scene, key);
+}
+
+function buildTools(scene: Phaser.Scene): void {
+  buildToolPencil(scene);
+  buildToolTweezers(scene);
   {
     const key = 'tool-marker';
     const W = 30, H = 160;

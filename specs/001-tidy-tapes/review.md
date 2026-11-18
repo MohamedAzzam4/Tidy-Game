@@ -31,11 +31,45 @@ carry explicit checks in tasks.md. No unresolved design questions; proceeding to
 
 ## Checkpoint reviews (filled as work lands)
 
-### C2 — cassette template
-- (pending)
+### C2 — cassette template (commit e992677)
+- Loose/turn/spine bakes ported from the handoff SVGs (bounds computed from the
+  paths + face matrices); 32×3 textures at boot; legacy family under `legacy-*`.
+- Symbol size raised from the reference's 21 to 32 art px after a zoom check
+  showed 9 px symbols failing the legibility bar at play zoom (reference
+  proportion kept, anchor kept). Verified: turn silhouette matches the layout
+  sheet; insert/remove probe restores 104×72 exactly; tray + repair face pick
+  the new art automatically through the canonical keys.
 
-### C3 — cabinets + background + hover
-- (pending)
+### C3 — cabinets + background + hover everywhere (commit 8148ac4)
+- Geometry revert verified live: unit 12 body center (2520,712) = compact
+  240×184 at the uniform 220 side-bank pitch; 16 units, 16 unitArt entries.
+- Fit view shows uniform cabinets, no inlay/seams/rim boundary anywhere.
+- Nudge probes: far-apart corners fire; pressed-button sweep → 0 nudges;
+  tray-zone tape correctly ignored (HUD exclusion); pile sweep nudges distinct
+  tapes once each (no buzz).
+- Before/after toggle swaps pixels only (unitRect identical across the toggle).
 
-### C4 — tools + verification
-- (pending)
+### C4 — tools + verification (final commit)
+- Pencil (paint-gradient body, graphite tip) and tweezers (angled steel, grip
+  ridges) baked rotated tip-down from the reference SVGs; repair gestures,
+  origins and display envelopes unchanged; verified in-scene via screenshots.
+- Suite: **22/28 automated** (baseline 20/28) on the rebuilt production build
+  at 1280×720. Rewritten T13b/c/d pass. Harness fixes landed: pilot-era ±40 px
+  grab offsets removed (T4b/T6), DPR/parent-size-robust fit-view check via
+  resizeHard (RESIZE mode derives gameSize from a cached parentSize — the
+  helper now refreshes bounds then resizes), speed-baseline re-anchor +
+  forced settings + corrected post-pickup displacement baseline in T13d.
+- Remaining 6 failures are pre-existing at baseline (identical names) and are
+  timing flakes of the ~1–2 fps throttled headless page. MANUAL verification
+  (this sandbox, real/synthetic input with generous timing): T9c pencil
+  double-click grab → release re-seats → drag-out removes ✓; T9d sticker
+  peel→wipe→place→press closes, tape repaired, returns loose ✓; T10 tray-full
+  refuses the sixth tape (stays loose, data path) ✓; T10b double-click loads a
+  tape into the tray ✓; T11 row chime + cabinet sound + no layering ✓; T9e
+  paint shares the verified event pipeline (not separately re-driven here).
+- Old-save migration: v3 save with a tape parked where the reverted racks now
+  stand → loads, 432 tapes, overlap fixup pushes it to the nearest legal spot,
+  nothing inside any rack ✓.
+- Screenshots (download/v4-screenshots/): fit board, two far-apart close-ups,
+  cabinet before/after at identical zoom+footprint, insert mid-flight/seated,
+  removal with canonical size restored, both tools in action.
