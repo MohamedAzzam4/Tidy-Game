@@ -1,12 +1,12 @@
 /**
- * Tidy Tapes — skills, marquee selection, slot guide and the three powers (v2).
+ * Tidy Tapes — skills, marquee selection, slot guide and the three powers (v3).
  *
- * Skill effects are separate (per the follow-up): spot damaged tapes (toggle),
- * reveal misfiled tapes (power 15 s / 60 s), show compatible racks for the
- * selected tape — BOTH matching rows including duplicates, with offscreen
- * pointers — highlight other tapes with the same color + symbol (power 15/60),
- * and the last skill: one-click pickup of matching loose tapes into free tray
- * slots only (instant effect, 60 s cooldown; nothing teleports past capacity).
+ * Skill effects are separate: spot damaged tapes (toggle D), reveal misfiled
+ * tapes (power M, 15 s / 60 s), show compatible racks for the selected tape
+ * (both matching rows, offscreen pointers), highlight other tapes with the same
+ * color + symbol (power S), and the last skill: one-click pickup of matching
+ * loose tapes into free tray slots only (G — was double-click in v2's repair
+ * shortcut era, rebinded per the v3 input scheme; repair-open is now R).
  * Powers gate ONLY themselves; expiry never touches held tapes or the session.
  */
 import Phaser from 'phaser';
@@ -23,13 +23,13 @@ export type PowerId = 'misplaced' | 'matchScan' | 'matchGather';
 
 export interface PowerState { unlocked: boolean; activeUntil: number; cooldownUntil: number }
 
-const SKILL_INFO: Record<SkillId, { name: string; hint: string }> = {
-  scanner: { name: 'Defect Scanner', hint: 'D — highlight tapes that need repair' },
-  guide: { name: 'Slot Guide', hint: 'Click a tape — both of its rows light up' },
-  misplaced: { name: 'Misfile Finder', hint: 'M — reveal tapes in wrong rows (15 s)' },
-  marquee: { name: 'Marquee Pickup', hint: 'Drag a box on the table to select up to 5' },
-  matchScan: { name: 'Match Scan', hint: 'S — click a tape: highlights same color + symbol' },
-  matchGather: { name: 'Match Gather', hint: 'G — click a tape: loads its loose matches into the tray' },
+const SKILL_INFO: Record<SkillId, { name: string; hint: string; key: string }> = {
+  scanner: { name: 'Defect Scanner', hint: 'highlight tapes that need repair', key: 'D' },
+  guide: { name: 'Slot Guide', hint: 'click a tape — both of its rows light up', key: '—' },
+  misplaced: { name: 'Misfile Finder', hint: 'reveal tapes in wrong rows (15 s)', key: 'M' },
+  marquee: { name: 'Marquee Pickup', hint: 'right-drag a box on the table to select up to 5', key: 'RMB' },
+  matchScan: { name: 'Match Scan', hint: 'click a tape: highlights same color + symbol', key: 'S' },
+  matchGather: { name: 'Match Gather', hint: 'click a tape: loads its loose matches into the tray', key: 'G' },
 };
 
 const POWER_IDS: PowerId[] = ['misplaced', 'matchScan', 'matchGather'];
@@ -73,9 +73,6 @@ export class SkillsController {
 
   // held badge for gathered bundles
   private gatherBadge: Phaser.GameObjects.Text;
-
-  private lastClickTape = -1;
-  private lastClickAt = 0;
 
   constructor(scene: GameScene) {
     this.scene = scene;
@@ -237,19 +234,7 @@ export class SkillsController {
   onTapeClick(id: number): void {
     const t = this.scene.tapeData(id) as Tape | undefined;
     if (!t || t.state !== 'loose') { this.clearGuide(); return; }
-    const now = this.scene.time.now;
-
-    // double-click a defective tape opens its repair in place
-    if (t.defect && !t.repaired) {
-      if (this.lastClickTape === id && now - this.lastClickAt < 360) {
-        this.lastClickAt = 0; this.lastClickTape = -1;
-        this.openRepair(id);
-        return;
-      }
-      this.lastClickAt = now;
-      this.lastClickTape = id;
-    }
-
+    // (v2's double-click repair opener is rebinded to the R key — see GameScene)
     if (this.isPowerActive('matchGather')) { this.gatherMatches(id); return; }
     if (this.isPowerActive('matchScan')) { this.scanMatches(id); return; }
     if (this.unlocked.guide) this.selectGuide(id); else this.clearGuide();
@@ -425,20 +410,12 @@ export class SkillsController {
     this.scene.game.events.emit('repair:open');
   }
 
-  onRepairClosed(id: number, success: boolean): void {
+  /** skills bookkeeping only — the v3 return flight lives in GameScene */
+  onRepairClosed(id: number, _success: boolean): void {
     const t = this.scene.tapeData(id);
-    if (t && success) {
-      t.repaired = true;
+    if (t) {
       const view = this.scene.tapeViews.get(id);
-      if (view) {
-        if (view.overlay) view.overlay.setVisible(false);
-        // return the tape to the sorting loop: loose at the bench edge
-        const spot = this.scene.drag.findTableSpotPublic(600, 1490);
-        view.container.setPosition(spot.x, spot.y).setRotation(0).setDepth(spot.y);
-        t.x = spot.x; t.y = spot.y; t.rot = 0;
-      }
-      this.scene.emitCounters();
-      this.scene.save();
+      if (view && view.overlay && t.repaired) view.overlay.setVisible(false);
     }
     this.emitChanged();
   }

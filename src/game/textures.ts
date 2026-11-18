@@ -9,7 +9,7 @@
  * entering tape is naturally occluded by the slot's south wall.
  */
 import Phaser from 'phaser';
-import { COLORS, SYMBOLS, ROW_CH_H, ROW_CH_TOP, ROW_PITCH, SLOT0_X, SLOT_PITCH } from './config';
+import { ART_PILOT, COLORS, SYMBOLS, ROW_CH_H, ROW_CH_TOP, ROW_PITCH, SLOT0_X, SLOT_PITCH } from './config';
 import { drawSymbol } from './symbols';
 
 function canvasTex(scene: Phaser.Scene, key: string, w: number, h: number): CanvasRenderingContext2D {
@@ -590,8 +590,9 @@ export function buildProps(scene: Phaser.Scene): void {
     }
     finish(scene, key);
   }
-  // generic contact shadow for runtime placement under props
-  {
+  // generic contact shadow for runtime placement under props (skipped when the
+  // uploaded art pack's SVG loaded first)
+  if (!scene.textures.exists('contact-shadow')) {
     const key = 'contact-shadow';
     const W = 128, H = 64;
     const ctx = canvasTex(scene, key, W, H);
@@ -677,6 +678,65 @@ export function buildSymbolStickers(scene: Phaser.Scene): void {
   }
 }
 
+/**
+ * "Before"-mode cabinet for the pilot footprint: plain warm wood with four
+ * open compartments and shelf rails at the same art-px positions as the walnut
+ * atlas, so the geometry (slots, seats, lips, hit areas) is identical between
+ * the before/after comparison modes — only the textures differ.
+ */
+export function buildPlainPilotCabinet(scene: Phaser.Scene): void {
+  const key = 'walnut-plain';
+  const k = ART_PILOT.cabScale;
+  const W = Math.round(ART_PILOT.art.w * k);
+  const H = Math.round(ART_PILOT.art.h * k);
+  const ctx = canvasTex(scene, key, W, H);
+  // outer frame
+  rr(ctx, 0, 0, W, H, 12);
+  ctx.fillStyle = '#6e4429'; ctx.fill();
+  ctx.lineWidth = 4; ctx.strokeStyle = '#4a2c1a'; ctx.stroke();
+  // subtle grain
+  ctx.strokeStyle = 'rgba(0,0,0,0.10)'; ctx.lineWidth = 1.6;
+  for (let g = 0; g < 10; g++) {
+    const gy = (g / 10) * H + h2(g * 13) * 12;
+    ctx.beginPath(); ctx.moveTo(6, gy);
+    ctx.bezierCurveTo(W * 0.33, gy + 3, W * 0.66, gy - 3, W - 6, gy);
+    ctx.stroke();
+  }
+  // top rim light
+  ctx.fillStyle = 'rgba(255,235,200,0.16)';
+  rr(ctx, 6, 4, W - 12, 6, 3); ctx.fill();
+  // four open compartments + shelf boards (art-px positions × cabScale)
+  for (let lr = 0; lr < 4; lr++) {
+    const top = Math.round((ART_PILOT.seats[lr] - 200) * k);
+    const bottom = Math.round((ART_PILOT.seats[lr] + 44) * k);
+    const left = Math.round(ART_PILOT.lips[lr][0] * k);
+    const right = Math.round((ART_PILOT.lips[lr][0] + 678) * k);
+    rr(ctx, left, top, right - left, bottom - top, 6);
+    ctx.fillStyle = '#241610'; ctx.fill();
+    const grad = ctx.createLinearGradient(0, top, 0, bottom);
+    grad.addColorStop(0, 'rgba(0,0,0,0.45)');
+    grad.addColorStop(1, 'rgba(0,0,0,0.05)');
+    ctx.fillStyle = grad;
+    rr(ctx, left, top, right - left, bottom - top, 6);
+    ctx.fill();
+    // shelf board + lip rail at the compartment bottom
+    const lipY = Math.round(ART_PILOT.lips[lr][1] * k);
+    ctx.fillStyle = '#8a5a3b';
+    rr(ctx, left, lipY, right - left, Math.round(48 * k), 4); ctx.fill();
+    ctx.fillStyle = 'rgba(255,235,200,0.22)';
+    ctx.fillRect(left + 2, lipY + 2, right - left - 4, 3);
+    // empty-slot hints at the 8 slot centers
+    ctx.strokeStyle = 'rgba(255,235,200,0.10)';
+    ctx.lineWidth = 1.4;
+    for (let s = 0; s < 8; s++) {
+      const cx = Math.round((ART_PILOT.slotSpan[0] + (s * (ART_PILOT.slotSpan[1] - ART_PILOT.slotSpan[0])) / 7) * k);
+      rr(ctx, cx - 10, top + 8, 20, bottom - top - 16, 3);
+      ctx.stroke();
+    }
+  }
+  finish(scene, key);
+}
+
 /** Build every texture (called once from BootScene). */
 export function buildAllTextures(scene: Phaser.Scene): void {
   buildWood(scene);
@@ -686,6 +746,7 @@ export function buildAllTextures(scene: Phaser.Scene): void {
   buildSymbolStickers(scene);
   buildUnitBody(scene);
   buildUnitLips(scene);
+  buildPlainPilotCabinet(scene);
   for (let combo = 0; combo < COLORS.length * SYMBOLS.length; combo++) {
     buildTapeFace(scene, combo);
     buildSpine(scene, combo);

@@ -10,7 +10,7 @@
  */
 import { Rng } from './rng';
 import {
-  CENTER, CENTER_MIN_TAPES, DEFECT_RATE, GROUPS, GROUP_CAPACITY,
+  ART_PILOT, CENTER, CENTER_MIN_TAPES, DEFECT_RATE, GROUPS, GROUP_CAPACITY,
   GROUP_FILL_MAX, GROUP_FILL_MIN, ROWS, ROWS_PER_GROUP, SLOTS_PER_ROW, TOTAL_MIN,
   UNIT_H, UNIT_W, UNITS, WORLD_H, WORLD_W, groupOfRow, rowsOfGroup, unitRect, benchRect,
 } from './config';
@@ -35,10 +35,12 @@ function scatterZones(): Zone[] {
     { x0: 396, y0: 620, x1: 552, y1: 1480 },
     // front band (below the center, above the bottom edge; bench sits left)
     { x0: 560, y0: 1500, x1: 2680, y1: 1730 },
-    // strip right of the right bank
-    { x0: 2668, y0: 620, x1: 2740, y1: 1460 },
-    // NOTE: no top-margin zone — tapes clamped to the world's y=90 floor there
-    // get trapped in the back bank's clearance pad (deadlock found in seed 169).
+    // v3: flanking aisles beside the now-centered north bank (tapes in the
+    // previously-empty upper-left / upper-right areas; y>=190 avoids the
+    // top-margin trap documented in v2). The brass lamp (pilot corner) is an
+    // obstacle, handled by badPos.
+    { x0: 200, y0: 190, x1: 800, y1: 540 },
+    { x0: 1990, y0: 190, x1: 2380, y1: 540 },
   ];
 }
 
@@ -177,21 +179,29 @@ export function generateWorld(seed: number): WorldData {
     placed.push({ x, y });
   }
 
-  // --- placement with obstacles (units + bench) ---
+  // --- placement with obstacles (units + bench + pilot lamp) ---
   const MARGIN = 40; // > tape bounding radius (~32): clearance around rack openings
+  const lampRect = { x: ART_PILOT.lamp.x, y: ART_PILOT.lamp.y, w: ART_PILOT.lamp.w, h: ART_PILOT.lamp.h };
   const badPos = (x: number, y: number): boolean => {
     if (x < 70 || x > WORLD_W - 70 || y < 90 || y > WORLD_H - 70) return true;
     for (let u = 0; u < UNITS; u++) {
       if (inRect(x, y, unitRect(u), MARGIN)) return true;
     }
     if (inRect(x, y, bench, MARGIN)) return true;
+    if (inRect(x, y, lampRect, 30)) return true;
     return false;
   };
   const COV_X = 92 * 0.55 + 2; // ~52.6 (light overlap allowed)
   const COV_Y = 60 * 0.55 + 2; // ~35
   const cellOf = (x: number, y: number) => ((x / 128) | 0) * 8192 + ((y / 128) | 0);
 
-  // initial sweep: push any forbidden start out (below the unit, else nearest side)
+  // initial sweep: push any forbidden start out (below the unit, else nearest side),
+  // clamped to the playable bounds every step (a push below the bench must never
+  // leave the world — found in the v3 flank-zone sweep, seed 161)
+  const clampXY = (p: { x: number; y: number }): { x: number; y: number } => ({
+    x: Math.max(70, Math.min(WORLD_W - 70, p.x)),
+    y: Math.max(90, Math.min(WORLD_H - 70, p.y)),
+  });
   for (let i = 0; i < placed.length; i++) {
     let p = placed[i];
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -202,9 +212,11 @@ export function generateWorld(seed: number): WorldData {
         if (inRect(p.x, p.y, ur, MARGIN)) { p = pushOutOfRect(p, ur, MARGIN); moved = true; }
       }
       if (inRect(p.x, p.y, bench, MARGIN)) { p = pushOutOfRect(p, bench, MARGIN); moved = true; }
+      if (inRect(p.x, p.y, lampRect, 30)) { p = pushOutOfRect(p, lampRect, 30); moved = true; }
+      p = clampXY(p);
       if (!moved) break;
     }
-    placed[i] = p;
+    placed[i] = clampXY(p);
   }
 
   // separation passes with obstacle-aware moves
@@ -289,6 +301,75 @@ export function generateWorld(seed: number): WorldData {
           placed[i] = { x: cx, y: cy };
           addToGrid(i);
           fixed = true;
+        }
+      }
+    }
+  }
+
+  // --- final safety net: EVERY tape ends valid, whatever the seed ---
+  // (a widened deterministic search, then a whole-table scan; the board always
+  // has a free spot, so this terminates — v3 flank-zone hardening)
+  {
+    const grid = new Map<number, number[]>();
+    const keyOf = (x: number, y: number) => ((x / 128) | 0) * 8192 + ((y / 128) | 0);
+    placed.forEach((_, i) => {
+      const key = keyOf(placed[i].x, placed[i].y);
+      const list = grid.get(key) ?? [];
+      list.push(i);
+      grid.set(key, list);
+    });
+    const freeAt = (x: number, y: number, ignore: number): boolean => {
+      if (badPos(x, y)) return false;
+      const cell = keyOf(x, y);
+      for (let gx = -1; gx <= 1; gx++) for (let gy = -1; gy <= 1; gy++) {
+        const list = grid.get(cell + gx * 8192 + gy);
+        if (!list) continue;
+        for (const j of list) {
+          if (j === ignore) continue;
+          if (Math.abs(placed[j].x - x) < COV_X && Math.abs(placed[j].y - y) < COV_Y) return false;
+        }
+      }
+      return true;
+    };
+    for (let i = 0; i < placed.length; i++) {
+      const p = placed[i];
+      if (freeAt(p.x, p.y, i)) continue;
+      let fixed = false;
+      for (let r = 40; r <= 1200 && !fixed; r += 40) {
+        for (let a = 0; a < 24 && !fixed; a++) {
+          const ang = (a / 24) * Math.PI * 2 + (i % 11) * 0.23;
+          const cx = p.x + Math.cos(ang) * r;
+          const cy = p.y + Math.sin(ang) * r;
+          if (freeAt(cx, cy, i)) {
+            const oldKey = keyOf(p.x, p.y);
+            const list = grid.get(oldKey);
+            if (list) { const at = list.indexOf(i); if (at >= 0) list.splice(at, 1); }
+            placed[i] = { x: cx, y: cy };
+            const key = keyOf(cx, cy);
+            const nl = grid.get(key) ?? [];
+            nl.push(i);
+            grid.set(key, nl);
+            fixed = true;
+          }
+        }
+      }
+      if (!fixed) {
+        // whole-table coarse scan (deterministic, guaranteed to find space)
+        outer:
+        for (let y = 200; y <= WORLD_H - 90; y += 44) {
+          for (let x = 90; x <= WORLD_W - 90; x += 60) {
+            if (freeAt(x, y, i)) {
+              const oldKey = keyOf(p.x, p.y);
+              const list = grid.get(oldKey);
+              if (list) { const at = list.indexOf(i); if (at >= 0) list.splice(at, 1); }
+              placed[i] = { x, y };
+              const key = keyOf(x, y);
+              const nl = grid.get(key) ?? [];
+              nl.push(i);
+              grid.set(key, nl);
+              break outer;
+            }
+          }
         }
       }
     }

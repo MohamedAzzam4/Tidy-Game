@@ -1,12 +1,17 @@
 /**
- * Tidy Tapes — save/load v2. localStorage is untrusted input: every field is guarded.
+ * Tidy Tapes — save/load v3. localStorage is untrusted input: every field is guarded.
  * Pure functions + a tiny storage adapter (browser-only guard).
  *
- * Layout version 2 (32 groups / 64 rows / tray). v1 saves are never silently
- * migrated: the game offers an explicit choice instead (see GameScene + UIScene).
+ * v3 layout (north bank centered, walnut pilot unit respaced) accepts v2 runs:
+ * the seed is the source of structure, mutable state is reapplied, and any loose
+ * tape that now sits inside a moved rack/bench/lamp rect is pushed to the
+ * nearest legal spot (overlap fixup) — never silently dropped.
  */
-import { GROUPS, ROWS, SAVE_KEY, SLOTS_PER_ROW, TRAY_SLOTS } from './config';
-import type { DefectType, SaveFile, Tape, WorldData } from './types';
+import {
+  ART_PILOT, GROUPS, ROWS, SAVE_KEY, SAVE_KEY_V2, SLOTS_PER_ROW, TRAY_SLOTS,
+  UNITS, WORLD_H, WORLD_W, benchRect, unitRect,
+} from './config';
+import type { DefectType, SaveFile, SaveSettings, Tape, WorldData } from './types';
 import { generateWorld } from './worldgen';
 import { validateWorld } from './validation';
 
@@ -17,15 +22,23 @@ const POWER_IDS = ['misplaced', 'matchScan', 'matchGather'];
 export interface SkillsSave { unlocked: Record<string, boolean> }
 export interface PowersSave { [power: string]: { unlocked: boolean; activeUntil: number; cooldownUntil: number } }
 
+export const DEFAULT_SETTINGS: SaveSettings = {
+  sound: true,
+  hoverFx: true,
+  pilotArt: true,
+  reducedMotion: false,
+};
+
 export function serializeRun(
   world: WorldData,
   skills: Record<string, boolean>,
   powers: Record<string, { unlocked: boolean; activeUntil: number; cooldownUntil: number }>,
   playSeconds: number,
   trayTapes: (number | null)[],
+  extra: { achievements?: number[]; milestones?: { rows: number; cabinets: number }; settings?: SaveSettings } = {},
 ): SaveFile {
   return {
-    version: 2,
+    version: 3,
     seed: world.seed,
     savedAt: Date.now(),
     tapes: world.tapes.map(t => ({
@@ -42,14 +55,17 @@ export function serializeRun(
       },
     ])),
     playSeconds: Math.max(0, playSeconds | 0),
+    achievements: (extra.achievements ?? []).slice(),
+    milestones: extra.milestones ?? { rows: 0, cabinets: 0 },
+    settings: { ...DEFAULT_SETTINGS, ...(extra.settings ?? {}) },
   };
 }
 
-/** Parse + validate a v2 save payload. Returns null when untrustworthy. */
+/** Parse + validate a v2/v3 save payload. Returns null when untrustworthy. */
 export function deserializeRun(raw: unknown): SaveFile | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const f = raw as Record<string, unknown>;
-  if (f.version !== 2) return null;
+  if (f.version !== 2 && f.version !== 3) return null;
   const seed = typeof f.seed === 'number' && Number.isFinite(f.seed) ? f.seed : null;
   if (seed === null) return null;
   if (!Array.isArray(f.tapes) || f.tapes.length < 400) return null;
@@ -137,8 +153,29 @@ export function deserializeRun(raw: unknown): SaveFile | null {
     }
   }
 
+  const achievements: number[] = [];
+  if (Array.isArray(f.achievements)) {
+    for (const v of f.achievements) {
+      if (typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < UNITS
+        && !achievements.includes(v)) achievements.push(v);
+    }
+  }
+  const milestones = {
+    rows: typeof (f.milestones as { rows?: unknown } | undefined)?.rows === 'number'
+      ? Math.max(0, (f.milestones as { rows: number }).rows | 0) : 0,
+    cabinets: typeof (f.milestones as { cabinets?: unknown } | undefined)?.cabinets === 'number'
+      ? Math.max(0, (f.milestones as { cabinets: number }).cabinets | 0) : 0,
+  };
+  const rawSettings = (f.settings ?? {}) as Record<string, unknown>;
+  const settings: SaveSettings = {
+    sound: rawSettings.sound !== false,
+    hoverFx: rawSettings.hoverFx !== false,
+    pilotArt: rawSettings.pilotArt !== false,
+    reducedMotion: rawSettings.reducedMotion === true,
+  };
+
   return {
-    version: 2,
+    version: 3,
     seed,
     savedAt: typeof f.savedAt === 'number' ? f.savedAt : Date.now(),
     tapes: world.tapes.map(t => ({
@@ -149,6 +186,9 @@ export function deserializeRun(raw: unknown): SaveFile | null {
     skills,
     powers,
     playSeconds: typeof f.playSeconds === 'number' ? Math.max(0, f.playSeconds | 0) : 0,
+    achievements,
+    milestones,
+    settings,
   };
 }
 
@@ -191,10 +231,64 @@ export function saveRun(data: SaveFile): boolean {
 
 export function loadRun(): SaveFile | null {
   try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
-    return deserializeRun(JSON.parse(raw));
+    for (const key of [SAVE_KEY, SAVE_KEY_V2]) {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = deserializeRun(JSON.parse(raw));
+      if (parsed) return parsed;
+    }
+    return null;
   } catch { return null; }
+}
+
+/**
+ * v3 layout fixup: push any LOOSE tape that now overlaps a rack (the centered
+ * north bank or the taller walnut pilot), the bench, or the pilot lamp out to
+ * the nearest legal spot. Shelved/tray tapes are position-independent. Idempotent.
+ */
+export function resolveSaveOverlaps(world: WorldData): number {
+  const obstacles = [] as { x: number; y: number; w: number; h: number }[];
+  for (let u = 0; u < UNITS; u++) obstacles.push(unitRect(u));
+  obstacles.push(benchRect());
+  obstacles.push({
+    x: ART_PILOT.lamp.x - 16, y: ART_PILOT.lamp.y - 16,
+    w: ART_PILOT.lamp.w + 32, h: ART_PILOT.lamp.h + 32,
+  });
+  const pad = 34;
+  const clamp = (p: { x: number; y: number }) => ({
+    x: Math.max(70, Math.min(WORLD_W - 70, p.x)),
+    y: Math.max(90, Math.min(WORLD_H - 70, p.y)),
+  });
+  let moved = 0;
+  for (const t of world.tapes) {
+    if (t.state !== 'loose') continue;
+    let hit = obstacles.find(r =>
+      t.x >= r.x - pad && t.x <= r.x + r.w + pad && t.y >= r.y - pad && t.y <= r.y + r.h + pad);
+    if (!hit) continue;
+    let fixed = false;
+    for (let r = 46; r <= 640 && !fixed; r += 46) {
+      for (let a = 0; a < 12 && !fixed; a++) {
+        const ang = (a / 12) * Math.PI * 2 + (t.id % 7) * 0.13;
+        const cx = t.x + Math.cos(ang) * r;
+        const cy = t.y + Math.sin(ang) * r;
+        const p = clamp({ x: cx, y: cy });
+        const blocked = obstacles.some(o =>
+          p.x >= o.x - pad && p.x <= o.x + o.w + pad && p.y >= o.y - pad && p.y <= o.y + o.h + pad);
+        if (blocked) continue;
+        t.x = Math.round(p.x * 10) / 10;
+        t.y = Math.round(p.y * 10) / 10;
+        moved++;
+        fixed = true;
+      }
+    }
+    if (!fixed) { // last resort: below the obstacle block
+      const p = clamp({ x: t.x, y: (hit?.y ?? 0) + (hit?.h ?? 0) + 60 });
+      t.x = Math.round(p.x * 10) / 10;
+      t.y = Math.round(p.y * 10) / 10;
+      moved++;
+    }
+  }
+  return moved;
 }
 
 export function clearRun(): void {
@@ -218,4 +312,4 @@ export function validateSaveWorld(world: WorldData): boolean {
   return validateWorld(world).ok && world.rows.length === ROWS;
 }
 
-export { GROUPS };
+export { GROUPS }; 

@@ -1,0 +1,33 @@
+{
+  "frames": {
+    "rim": {
+      "frame": {
+        "x": 40,
+        "y": 303,
+        "w": 2093,
+        "h": 143
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 2093,
+        "h": 143
+      },
+      "sourceSize": {
+        "w": 2093,
+        "h": 143
+      }
+    }
+  },
+  "meta": {
+    "image": "table-rim.png",
+    "format": "RGBA8888",
+    "size": {
+      "w": 2172,
+      "h": 724
+    },
+    "scale": "1"
+  }
+}

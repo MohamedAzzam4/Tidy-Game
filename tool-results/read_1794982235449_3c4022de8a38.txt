@@ -1,0 +1,701 @@
+     1→import Phaser from 'phaser';
+     2→import {
+     3→  BENCH, COLORS, ROWS_PER_UNIT, SKILL_THRESHOLDS, SPINE_H, SPINE_W, SYMBOLS, UNITS,
+     4→  WORLD_H, WORLD_W, ZOOM_MAX, ZOOM_MIN, benchRect, rowRect, slotPos, trayScreenRect,
+     5→  unitOfRow, unitPos, unitRect, groupOfRow, rowsOfGroup, ROW_CH_TOP, ROW_PITCH, ROW_CH_H,
+     6→  UNIT_W, UNIT_H,
+     7→} from '../config';
+     8→import { defectBlocksFiling } from '../types';
+     9→import type { Row, Tape, WorldData, SkillId } from '../types';
+    10→import { generateWorld } from '../worldgen';
+    11→import { boardCorrect, validateWorld } from '../validation';
+    12→import { audio } from '../audio';
+    13→import { DragController } from '../controllers/DragController';
+    14→import { SkillsController, type PowerId } from '../controllers/SkillsController';
+    15→import { randomSeed } from '../rng';
+    16→import { applySave, loadRun, saveRun, serializeRun, storageAvailable } from '../save';
+    17→
+    18→export interface TapeView {
+    19→  id: number;
+    20→  container: Phaser.GameObjects.Container;
+    21→  face: Phaser.GameObjects.Image;
+    22→  spine: Phaser.GameObjects.Image;
+    23→  overlay: Phaser.GameObjects.Image | null; // defect marks
+    24→}
+    25→
+    26→export interface UnitView {
+    27→  unit: number;
+    28→  body: Phaser.GameObjects.Image;
+    29→  lips: Phaser.GameObjects.Image;
+    30→  chips: Phaser.GameObjects.Image[];
+    31→  counts: Phaser.GameObjects.Text[];
+    32→  verify: Phaser.GameObjects.Text;
+    33→}
+    34→
+    35→const PAN_SPEED = 700;
+    36→
+    37→export class GameScene extends Phaser.Scene {
+    38→  world!: WorldData;
+    39→  tapeViews = new Map<number, TapeView>();
+    40→  unitViews = new Map<number, UnitView>();
+    41→  trayTapes: (number | null)[] = [null, null, null, null, null];
+    42→  drag!: DragController;
+    43→  skills!: SkillsController;
+    44→  sortedCount = 0;
+    45→  seed = 0;
+    46→  playSeconds = 0;
+    47→  storageOk = storageAvailable();
+    48→  /** carried-over skill unlocks when migrating from a v1 save */
+    49→  carriedSkills: Record<SkillId, boolean> | null = null;
+    50→  pendingSave: ReturnType<typeof loadRun> = null;
+    51→  private override: { seed?: number; fresh?: boolean; carry?: boolean } | null = null;
+    52→  private saveTimer = 0;
+    53→  keys!: Record<string, Phaser.Input.Keyboard.Key>;
+    54→  private storageWarned = false;
+    55→  private completionShownFlag = false;
+    56→  private notDoneShown = false;
+    57→  private uiBlocked = false;
+    58→
+    59→  constructor() {
+    60→    super({ key: 'Game' });
+    61→  }
+    62→
+    63→  init(data: { seed?: number; fresh?: boolean; carry?: boolean }): void {
+    64→    this.override = data ?? null;
+    65→    // scene.restart() reuses the instance: reset mutable session state
+    66→    this.tapeViews = new Map();
+    67→    this.unitViews = new Map();
+    68→    this.trayTapes = [null, null, null, null, null];
+    69→    this.sortedCount = 0;
+    70→    this.playSeconds = 0;
+    71→    this.completionShownFlag = false;
+    72→    this.notDoneShown = false;
+    73→    this.saveTimer = 0;
+    74→    this.carriedSkills = null;
+    75→    this.pendingSave = null;
+    76→    this.uiBlocked = false;
+    77→  }
+    78→
+    79→  create(): void {
+    80→    this.seed = this.readSeedParam();
+    81→    this.world = generateWorld(this.seed);
+    82→    const validation = validateWorld(this.world);
+    83→    if (!validation.ok) {
+    84→      console.warn('world validation issues:', validation.issues.slice(0, 4));
+    85→    }
+    86→    if (this.pendingSave) applySave(this.world, this.pendingSave);
+    87→
+    88→    this.buildWorldVisuals();
+    89→    this.drag = new DragController(this);
+    90→    this.skills = new SkillsController(this);
+    91→    this.drag.skills = this.skills;
+    92→    if (this.pendingSave) {
+    93→      this.skills.unlocked = { ...this.pendingSave.skills } as Record<SkillId, boolean>;
+    94→      for (const [k, v] of Object.entries(this.pendingSave.powers)) {
+    95→        const pw = this.skills.powers[k as PowerId];
+    96→        if (pw) {
+    97→          pw.unlocked = v.unlocked;
+    98→          pw.cooldownUntil = Math.max(0, v.cooldownUntil - Date.now());
+    99→          pw.activeUntil = 0;
+   100→        }
+   101→      }
+   102→      this.playSeconds = this.pendingSave.playSeconds ?? 0;
+   103→      const tray = this.pendingSave.tray;
+   104→      if (Array.isArray(tray)) {
+   105→        this.trayTapes = tray.slice(0, 5).map(v => (typeof v === 'number' ? v : null));
+   106→        while (this.trayTapes.length < 5) this.trayTapes.push(null);
+   107→        for (const id of this.trayTapes) if (id !== null) this.stowInTrayView(id);
+   108→      }
+   109→      this.pendingSave = null;
+   110→    } else if (this.carriedSkills) {
+   111→      this.skills.unlocked = { ...this.carriedSkills };
+   112→      this.skills.syncPowerUnlocks();
+   113→    }
+   114→
+   115→    this.setupCamera();
+   116→    this.setupInput();
+   117→    this.setupSaveHooks();
+   118→
+   119→    this.game.events.emit('tray:changed');
+   120→    this.game.events.emit('game:ready');
+   121→    this.emitCounters();
+   122→  }
+   123→
+   124→  // ------------------------------------------------------------- world visuals
+   125→  private buildWorldVisuals(): void {
+   126→    const table = this.add.tileSprite(0, 0, WORLD_W, WORLD_H, 'wood');
+   127→    table.setOrigin(0, 0).setDepth(0);
+   128→
+   129→    // warm table edge with a front-face band (south) + darker side bands
+   130→    const edges = this.add.graphics().setDepth(1);
+   131→    edges.fillStyle(0x2e1c12, 0.55);
+   132→    edges.fillRect(0, WORLD_H - 34, WORLD_W, 34);   // front face band
+   133→    edges.fillStyle(0x4a2c1a, 0.85);
+   134→    edges.fillRect(0, WORLD_H - 12, WORLD_W, 12);   // front face lower lip
+   135→    edges.fillStyle(0x2e1c12, 0.35);
+   136→    edges.fillRect(0, 0, WORLD_W, 18);
+   137→    edges.fillRect(0, 0, 18, WORLD_H);
+   138→    edges.fillRect(WORLD_W - 18, 0, 18, WORLD_H);
+   139→    edges.fillStyle(0xffebc8, 0.08);
+   140→    edges.fillRect(0, WORLD_H - 34, WORLD_W, 3);    // light catching the front edge
+   141→
+   142→    const bench = this.add.image(BENCH.x + BENCH.w / 2, BENCH.y + BENCH.h / 2, 'bench');
+   143→    bench.setDisplaySize(BENCH.w, BENCH.h).setDepth(2);
+   144→    this.add.text(BENCH.x + BENCH.w / 2, BENCH.y + 26, 'REPAIR BENCH', {
+   145→      fontFamily: 'Georgia, "Times New Roman", serif', fontSize: '19px',
+   146→      color: '#5b3b26', fontStyle: 'bold',
+   147→    }).setOrigin(0.5).setDepth(2).setAlpha(0.85);
+   148→
+   149→    // props (decorative dressing on the busy bench)
+   150→    this.add.image(214, 96, 'prop-lamp').setDepth(3).setScale(0.8);
+   151→    this.add.image(2688, 250, 'prop-radio').setDepth(3).setScale(0.9);
+   152→    this.add.image(2540, 1660, 'prop-plant').setDepth(3).setScale(0.85);
+   153→    this.add.image(560, 1650, 'prop-books').setDepth(3).setScale(0.9);
+   154→
+   155→    // rack units (layered: body < chips/counts < seated spines < lips)
+   156→    for (let u = 0; u < UNITS; u++) {
+   157→      const p = unitPos(u);
+   158→      const body = this.add.image(p.x + UNIT_W / 2, p.y + UNIT_H / 2, 'unit-body');
+   159→      body.setDisplaySize(UNIT_W, UNIT_H).setDepth(p.y);
+   160→      const lips = this.add.image(p.x + UNIT_W / 2, p.y + UNIT_H / 2, 'unit-lips');
+   161→      lips.setDisplaySize(UNIT_W, UNIT_H).setDepth(p.y + 2);
+   162→      const chips: Phaser.GameObjects.Image[] = [];
+   163→      const counts: Phaser.GameObjects.Text[] = [];
+   164→      for (let lr = 0; lr < ROWS_PER_UNIT; lr++) {
+   165→        const row = u * ROWS_PER_UNIT + lr;
+   166→        const group = groupOfRow(row);
+   167→        const cy = p.y + ROW_CH_TOP + lr * ROW_PITCH + ROW_CH_H / 2;
+   168→        const chip = this.add.image(p.x + 24, cy, `chip-${group}`);
+   169→        chip.setDisplaySize(28, 28).setDepth(p.y + 0.4);
+   170→        chips.push(chip);
+   171→        const count = this.add.text(p.x + UNIT_W - 10, cy - 7, '0/8', {
+   172→          fontFamily: 'Georgia, serif', fontSize: '12px', color: '#f6efdd',
+   173→        }).setOrigin(1, 0).setDepth(p.y + 0.5);
+   174→        counts.push(count);
+   175→      }
+   176→      const verify = this.add.text(p.x + UNIT_W - 34, p.y + 16, '✓?', {
+   177→        fontFamily: 'Georgia, serif', fontSize: '14px', fontStyle: 'bold', color: '#ffe9a8',
+   178→        backgroundColor: '#5a3520', padding: { x: 6, y: 2 },
+   179→      }).setOrigin(0.5).setDepth(p.y + 0.5).setInteractive({ useHandCursor: true });
+   180→      verify.on('pointerdown', () => { audio.unlock(); this.verifyUnit(u); });
+   181→      this.unitViews.set(u, { unit: u, body, lips, chips, counts, verify });
+   182→    }
+   183→
+   184→    // tapes
+   185→    for (const tape of this.world.tapes) {
+   186→      if (tape.state === 'shelved') {
+   187→        this.spawnShelvedTape(tape);
+   188→      } else if (tape.state === 'tray') {
+   189→        this.spawnLooseTape(tape);
+   190→        this.stowInTrayView(tape.id);
+   191→      } else {
+   192→        this.spawnLooseTape(tape);
+   193→      }
+   194→    }
+   195→    this.sortedCount = this.world.tapes.filter(t => t.state === 'shelved').length;
+   196→  }
+   197→
+   198→  spawnLooseTape(tape: Tape): TapeView {
+   199→    const face = this.add.image(0, 0, `tape-face-${tape.combo}`);
+   200→    face.setDisplaySize(104, 72);
+   201→    const spine = this.add.image(0, 0, `spine-${tape.combo}`);
+   202→    spine.setDisplaySize(SPINE_W, SPINE_H).setVisible(false);
+   203→    const container = this.add.container(tape.x, tape.y, [face, spine]);
+   204→    container.setRotation(tape.rot);
+   205→    const view: TapeView = { id: tape.id, container, face, spine, overlay: null };
+   206→    if (tape.defect && !tape.repaired) {
+   207→      const ov = this.add.image(0, 0, `defect-${tape.defect}`);
+   208→      ov.setDisplaySize(92, 60);
+   209→      container.add(ov);
+   210→      view.overlay = ov;
+   211→    }
+   212→    container.setSize(92, 60);
+   213→    container.setInteractive(new Phaser.Geom.Rectangle(-46, -30, 92, 60), Phaser.Geom.Rectangle.Contains);
+   214→    container.setData('tapeId', tape.id);
+   215→    container.setDepth(tape.y);
+   216→    this.tapeViews.set(tape.id, view);
+   217→    return view;
+   218→  }
+   219→
+   220→  spawnShelvedTape(tape: Tape): TapeView {
+   221→    const spine = this.add.image(0, 0, `spine-${tape.combo}`);
+   222→    spine.setDisplaySize(SPINE_W, SPINE_H);
+   223→    const face = this.add.image(0, 0, `tape-face-${tape.combo}`);
+   224→    face.setDisplaySize(104, 72).setVisible(false);
+   225→    const container = this.add.container(0, 0, [face, spine]);
+   226→    container.setSize(SPINE_W, SPINE_H); // thin hit strip on the seated spine
+   227→    container.setInteractive(new Phaser.Geom.Rectangle(-SPINE_W / 2, -SPINE_H / 2, SPINE_W, SPINE_H), Phaser.Geom.Rectangle.Contains);
+   228→    container.setData('tapeId', tape.id);
+   229→    const p = slotPos(tape.row as number, tape.slot as number);
+   230→    const u = unitOfRow(tape.row as number);
+   231→    const lr = (tape.row as number) % ROWS_PER_UNIT;
+   232→    container.setPosition(p.x, p.y).setDepth(unitPos(u).y + 1 + lr * 0.02);
+   233→    const view: TapeView = { id: tape.id, container, face, spine, overlay: null };
+   234→    this.tapeViews.set(tape.id, view);
+   235→    const row = this.world.rows[tape.row as number];
+   236→    row.slots[tape.slot as number] = tape.id;
+   237→    this.updateRowCount(tape.row as number);
+   238→    return view;
+   239→  }
+   240→
+   241→  /** hide the world view of a tape that lives in the tray */
+   242→  stowInTrayView(id: number): void {
+   243→    const view = this.tapeViews.get(id);
+   244→    if (view) {
+   245→      view.container.setVisible(false);
+   246→      view.container.disableInteractive();
+   247→    }
+   248→    this.game.events.emit('tray:changed');
+   249→  }
+   250→
+   251→  restoreFromTrayView(id: number): void {
+   252→    const view = this.tapeViews.get(id);
+   253→    if (view) {
+   254→      view.container.setVisible(true);
+   255→      view.container.setInteractive(new Phaser.Geom.Rectangle(-46, -30, 92, 60), Phaser.Geom.Rectangle.Contains);
+   256→    }
+   257→    this.game.events.emit('tray:changed');
+   258→  }
+   259→
+   260→  // ------------------------------------------------------------------- tray
+   261→  trayFreeSlots(): number {
+   262→    return this.trayTapes.filter(s => s === null).length;
+   263→  }
+   264→
+   265→  trayLoad(id: number): number {
+   266→    const slot = this.trayTapes.indexOf(null);
+   267→    if (slot < 0) return -1;
+   268→    const t = this.tapeData(id);
+   269→    if (!t) return -1;
+   270→    this.trayTapes[slot] = id;
+   271→    t.state = 'tray';
+   272→    t.row = null; t.slot = null;
+   273→    this.stowInTrayView(id);
+   274→    return slot;
+   275→  }
+   276→
+   277→  trayRemoveAt(slot: number): number | null {
+   278→    const id = this.trayTapes[slot];
+   279→    if (id === null) return null;
+   280→    this.trayTapes[slot] = null;
+   281→    this.restoreFromTrayView(id);
+   282→    return id;
+   283→  }
+   284→
+   285→  trayRemoveTape(id: number): boolean {
+   286→    const slot = this.trayTapes.indexOf(id);
+   287→    if (slot < 0) return false;
+   288→    this.trayRemoveAt(slot);
+   289→    return true;
+   290→  }
+   291→
+   292→  trayIds(): number[] {
+   293→    return this.trayTapes.filter((v): v is number => v !== null);
+   294→  }
+   295→
+   296→  // ------------------------------------------------------------------ camera
+   297→  private setupCamera(): void {
+   298→    const cam = this.cameras.main;
+   299→    cam.setBounds(0, 0, WORLD_W, WORLD_H);
+   300→    cam.setBackgroundColor('#2a1a10');
+   301→    // first impression: the back bank of organizers + the busy center together
+   302→    cam.setZoom(0.72);
+   303→    cam.centerOn(1420, 770);
+   304→    const kb = this.input.keyboard as Phaser.Input.Keyboard.KeyboardPlugin;
+   305→    this.keys = kb.addKeys('W,A,S,D,UP,LEFT,DOWN,RIGHT,PLUS,MINUS,Q,E,SPACE,ESC,F') as Record<string, Phaser.Input.Keyboard.Key>;
+   306→  }
+   307→
+   308→  panCamera(dx: number, dy: number): void {
+   309→    const cam = this.cameras.main;
+   310→    cam.scrollX += dx / cam.zoom;
+   311→    cam.scrollY += dy / cam.zoom;
+   312→  }
+   313→
+   314→  zoomBy(delta: number): void {
+   315→    const cam = this.cameras.main;
+   316→    this.zoomAt(this.scale.width / 2, this.scale.height / 2, cam.zoom + delta);
+   317→  }
+   318→
+   319→  /** zoom anchored on a screen point (cursor), then clamped by world bounds */
+   320→  zoomAt(screenX: number, screenY: number, targetZoom: number): void {
+   321→    const cam = this.cameras.main;
+   322→    const z = Phaser.Math.Clamp(targetZoom, ZOOM_MIN, ZOOM_MAX);
+   323→    if (z === cam.zoom) return;
+   324→    // pure math (getWorldPoint reads cached matrices around setZoom, which
+   325→    // silently cancels the anchor correction)
+   326→    const wx = cam.scrollX + screenX / cam.zoom;
+   327→    const wy = cam.scrollY + screenY / cam.zoom;
+   328→    cam.setZoom(z);
+   329→    cam.scrollX = wx - screenX / z;
+   330→    cam.scrollY = wy - screenY / z;
+   331→    this.game.events.emit('camera:zoom', z);
+   332→  }
+   333→
+   334→  fitToTable(): void {
+   335→    const cam = this.cameras.main;
+   336→    const z = Phaser.Math.Clamp(
+   337→      Math.min(this.scale.width / WORLD_W, this.scale.height / WORLD_H),
+   338→      ZOOM_MIN, ZOOM_MAX,
+   339→    );
+   340→    cam.setZoom(z);
+   341→    cam.centerOn(WORLD_W / 2, WORLD_H / 2);
+   342→    this.game.events.emit('camera:zoom', z);
+   343→  }
+   344→
+   345→  // ------------------------------------------------------------------- input
+   346→  private setupInput(): void {
+   347→    this.input.mouse?.disableContextMenu();
+   348→    this.input.addPointer(3); // multi-touch
+   349→
+   350→    // wheel = zoom, centered on the cursor (v2; pan stays on keys/drag/touch)
+   351→    this.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
+   352→      audio.unlock();
+   353→      const d = Phaser.Math.Clamp(dy, -180, 180);
+   354→      this.zoomAt(_p.x, _p.y, this.cameras.main.zoom * Math.pow(0.9985, d));
+   355→    });
+   356→
+   357→    this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+   358→      audio.unlock();
+   359→      if (this.uiBlocked || this.pointerOverUI(pointer)) return;
+   360→      this.drag.onPointerDown(pointer);
+   361→    });
+   362→    this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+   363→      this.drag.onPointerMove(pointer);
+   364→    });
+   365→    this.input.on('pointerup', (pointer: Phaser.Input.Pointer) => {
+   366→      this.drag.onPointerUp(pointer);
+   367→    });
+   368→
+   369→    const kb2 = this.input.keyboard as Phaser.Input.Keyboard.KeyboardPlugin;
+   370→    kb2.on('keydown-ESC', () => this.drag.cancel());
+   371→    kb2.on('keydown-D', () => this.skills.toggleScanner());
+   372→    kb2.on('keydown-M', () => this.skills.tryActivatePower('misplaced'));
+   373→    kb2.on('keydown-S', () => this.skills.tryActivatePower('matchScan'));
+   374→    kb2.on('keydown-G', () => this.skills.tryActivatePower('matchGather'));
+   375→    kb2.on('keydown-F', () => this.fitToTable());
+   376→    kb2.on('keydown', () => audio.unlock());
+   377→
+   378→    this.game.events.on('repair:closed', this.onRepairClosed, this);
+   379→    this.game.events.on('ui:block', (v: boolean) => { this.uiBlocked = v; });
+   380→    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+   381→      this.game.events.off('repair:closed', this.onRepairClosed, this);
+   382→      this.game.events.off('ui:block');
+   383→    });
+   384→  }
+   385→
+   386→  /** screen-space UI regions the game scene must not treat as table input */
+   387→  pointerOverUI(pointer: Phaser.Input.Pointer): boolean {
+   388→    const W = this.scale.width;
+   389→    const H = this.scale.height;
+   390→    if (pointer.y < 58) return true; // top bar
+   391→    const tray = trayScreenRect(W, H);
+   392→    if (pointer.x >= tray.x - 6 && pointer.x <= tray.x + tray.w + 6
+   393→      && pointer.y >= tray.y - 6 && pointer.y <= tray.y + tray.h + 6) return true;
+   394→    if (pointer.y > H - 100 && pointer.x < 880) return true; // skill chips bar
+   395→    return false;
+   396→  }
+   397→
+   398→  private onRepairClosed(data: { id: number; success: boolean }): void {
+   399→    this.skills.onRepairClosed(data.id, data.success);
+   400→    this.emitCounters();
+   401→  }
+   402→
+   403→  // ------------------------------------------------------------- session flow
+   404→  newGame(seed?: number, carrySkills = false): void {
+   405→    const useSeed = seed ?? randomSeed();
+   406→    if (carrySkills) {
+   407→      const keep: Record<string, boolean> = { ...this.skills.unlocked };
+   408→      this.scene.restart({ seed: useSeed, fresh: true, carry: true, skills: keep });
+   409→    } else {
+   410→      this.scene.restart({ seed: useSeed, fresh: true });
+   411→    }
+   412→  }
+   413→
+   414→  private readSeedParam(): number {
+   415→    const p = new URLSearchParams(window.location.search);
+   416→    if (this.override?.seed !== undefined) return this.override.seed >>> 0;
+   417→    if (this.override?.fresh) {
+   418→      if (this.override.carry && (this.override as { skills?: Record<string, boolean> }).skills) {
+   419→        this.carriedSkills = (this.override as { skills?: Record<SkillId, boolean> }).skills ?? null;
+   420→      }
+   421→      return randomSeed();
+   422→    }
+   423→    if (p.has('seed')) {
+   424→      const s = Number.parseInt(p.get('seed') as string, 10);
+   425→      if (Number.isFinite(s)) return s >>> 0;
+   426→    }
+   427→    // v1 save present? offer migration instead of silently dropping progress
+   428→    if (!p.has('autotest')) {
+   429→      try {
+   430→        const raw1 = localStorage.getItem('tidy-tapes-save-v1');
+   431→        if (raw1) {
+   432→          // flag only: the UI scene shows the choice panel when it becomes ready
+   433→          this.game.registry.set('v1SaveFound', true);
+   434→        }
+   435→      } catch { /* ignore */ }
+   436→    }
+   437→    // restore saved v2 run when present (autotest phase 2 uses ?restore=1)
+   438→    if ((!p.has('autotest') || p.has('restore')) && this.storageOk) {
+   439→      const save = loadRun();
+   440→      if (save) {
+   441→        this.pendingSave = save;
+   442→        return save.seed;
+   443→      }
+   444→    }
+   445→    return 20261118;
+   446→  }
+   447→
+   448→  save(): void {
+   449→    if (!this.storageOk) {
+   450→      if (!this.storageWarned) {
+   451→        this.storageWarned = true;
+   452→        this.game.events.emit('toast', 'Saving unavailable in this browser — progress is session-only.');
+   453→      }
+   454→      return;
+   455→    }
+   456→    try {
+   457→      const file = serializeRun(this.world, this.skills.unlocked, this.skills.powersSave(), this.playSeconds, this.trayTapes);
+   458→      saveRun(file);
+   459→    } catch { /* ignore */ }
+   460→    this.game.events.emit('save:flash');
+   461→  }
+   462→
+   463→  private setupSaveHooks(): void {
+   464→    window.addEventListener('beforeunload', () => this.save());
+   465→    document.addEventListener('visibilitychange', () => {
+   466→      if (document.visibilityState === 'hidden') this.save();
+   467→    });
+   468→    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+   469→      window.removeEventListener('beforeunload', () => this.save());
+   470→      document.removeEventListener('visibilitychange', () => this.save());
+   471→    });
+   472→  }
+   473→
+   474→  // ------------------------------------------------------------------ helpers
+   475→  tapeAt(id: number): TapeView | undefined { return this.tapeViews.get(id); }
+   476→
+   477→  tapeData(id: number): Tape | undefined { return this.world.tapes.find(t => t.id === id); }
+   478→
+   479→  /** row under a world point (any row, matching or not — hidden correctness). */
+   480→  rowUnder(x: number, y: number): Row | null {
+   481→    for (const row of this.world.rows) {
+   482→      const r = rowRect(row.id);
+   483→      if (x >= r.x - 8 && x <= r.x + r.w + 8 && y >= r.y - 10 && y <= r.y + r.h + 10) return row;
+   484→    }
+   485→    return null;
+   486→  }
+   487→
+   488→  unitUnder(x: number, y: number): number | null {
+   489→    for (let u = 0; u < UNITS; u++) {
+   490→      const r = unitRect(u);
+   491→      if (x >= r.x - 8 && x <= r.x + r.w + 8 && y >= r.y - 8 && y <= r.y + r.h + 14) return u;
+   492→    }
+   493→    return null;
+   494→  }
+   495→
+   496→  benchUnder(x: number, y: number): boolean {
+   497→    const b = benchRect();
+   498→    return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+   499→  }
+   500→
+   501→  updateRowCount(rowId: number): void {
+   502→    const row = this.world.rows[rowId];
+   503→    const used = row.slots.filter(s => s !== null).length;
+   504→    const u = unitOfRow(rowId);
+   505→    const view = this.unitViews.get(u);
+   506→    if (view) view.counts[rowId % ROWS_PER_UNIT].setText(`${used}/8`);
+   507→  }
+   508→
+   509→  comboLabel(combo: number): string {
+   510→    const c = COLORS[Math.floor(combo / SYMBOLS.length)];
+   511→    const s = SYMBOLS[combo % SYMBOLS.length];
+   512→    return `${c.name} ${s}`;
+   513→  }
+   514→
+   515→  emitCounters(): void {
+   516→    const loose = this.world.tapes.filter(t => t.state === 'loose').length;
+   517→    const tray = this.world.tapes.filter(t => t.state === 'tray').length;
+   518→    const repairs = this.world.tapes.filter(t => t.defect && !t.repaired
+   519→      && (t.defect === 'rewind' || t.defect === 'sticker')).length;
+   520→    this.game.events.emit('counters', {
+   521→      shelved: this.sortedCount,
+   522→      total: this.world.totalTapes,
+   523→      loose,
+   524→      tray,
+   525→      repairs,
+   526→      thresholds: SKILL_THRESHOLDS,
+   527→    });
+   528→  }
+   529→
+   530→  // ---------------------------------------------------- verify + win checking
+   531→  verifyUnit(u: number): void {
+   532→    let wrong = 0;
+   533→    let seated = 0;
+   534→    for (let lr = 0; lr < ROWS_PER_UNIT; lr++) {
+   535→      const row = this.world.rows[u * ROWS_PER_UNIT + lr];
+   536→      for (const id of row.slots) {
+   537→        if (id === null) continue;
+   538→        seated++;
+   539→        const t = this.tapeData(id);
+   540→        if (!t || t.combo !== row.group) wrong++;
+   541→      }
+   542→    }
+   543→    if (seated === 0) {
+   544→      this.game.events.emit('toast', 'Nothing to check yet — this organizer is empty.');
+   545→      return;
+   546→    }
+   547→    if (wrong === 0) {
+   548→      audio.play('chime'); // Tiny Chime: explicit player-verified confirmation
+   549→      this.game.events.emit('toast', 'Verified — every tape in this organizer matches its rows.');
+   550→    } else {
+   551→      audio.play('thud');
+   552→      this.game.events.emit('toast', 'Not quite — a tape in this organizer is in the wrong row.');
+   553→    }
+   554→  }
+   555→
+   556→  get completionShown(): boolean {
+   557→    return this.completionShownFlag;
+   558→  }
+   559→
+   560→  checkCompletion(): void {
+   561→    if (this.completionShownFlag) return;
+   562→    const allSeated = this.world.tapes.every(t => t.state === 'shelved');
+   563→    if (!allSeated) { this.notDoneShown = false; return; }
+   564→    if (boardCorrect(this.world)) {
+   565→      this.completionShownFlag = true;
+   566→      audio.play('chime');            // verified end-of-job milestone
+   567→      audio.play('complete', { delay: 0.35 });
+   568→      this.game.events.emit('complete', {
+   569→        seed: this.seed,
+   570→        playSeconds: this.playSeconds,
+   571→        repairs: this.world.tapes.filter(t => t.defect).length,
+   572→      });
+   573→      this.save();
+   574→    } else if (!this.notDoneShown) {
+   575→      // general message only: no location, no count, no sound difference
+   576→      this.notDoneShown = true;
+   577→      this.game.events.emit('toast', 'Every tape is shelved… but the job isn\'t done. Something sits in a wrong row — check organizers with ✓, or use the Misfile Finder.');
+   578→    }
+   579→  }
+   580→
+   581→  update(_time: number, delta: number): void {
+   582→    const dt = delta / 1000;
+   583→    this.playSeconds += dt;
+   584→
+   585→    // keyboard camera panning (works while holding tapes)
+   586→    let vx = 0, vy = 0;
+   587→    if (this.keys.A?.isDown || this.keys.LEFT?.isDown) vx -= 1;
+   588→    if (this.keys.D?.isDown || this.keys.RIGHT?.isDown) vx += 1;
+   589→    if (this.keys.W?.isDown || this.keys.UP?.isDown) vy -= 1;
+   590→    if (this.keys.S?.isDown || this.keys.DOWN?.isDown) vy += 1;
+   591→    if (vx !== 0 || vy !== 0) {
+   592→      this.panCamera(vx * PAN_SPEED * dt, vy * PAN_SPEED * dt);
+   593→    }
+   594→    if (this.keys.Q?.isDown) this.zoomBy(0.35 * dt);
+   595→    if (this.keys.E?.isDown) this.zoomBy(-0.35 * dt);
+   596→    if (this.keys.PLUS?.isDown) this.zoomBy(0.5 * dt);
+   597→    if (this.keys.MINUS?.isDown) this.zoomBy(-0.5 * dt);
+   598→
+   599→    this.drag.update();
+   600→    this.skills.update();
+   601→
+   602→    // autosave every 4s of play (debounced further on writes)
+   603→    this.saveTimer += dt;
+   604→    if (this.saveTimer > 4) {
+   605→      this.saveTimer = 0;
+   606→      if (this.drag.held === null && !this.drag.trayBatchDrag) this.save();
+   607→    }
+   608→  }
+   609→
+   610→  // -------------------------------------------------------- debug/test helpers
+   611→  /** actually shelve loose tapes into CORRECT rows via the real data path */
+   612→  debugShelve(count: number, combo?: number): number {
+   613→    let shelved = 0;
+   614→    for (const t of this.world.tapes) {
+   615→      if (shelved >= count) break;
+   616→      if (t.state !== 'loose' || (t.defect && !t.repaired)) continue;
+   617→      if (combo !== undefined && t.combo !== combo) continue;
+   618→      let row: typeof this.world.rows[number] | null = null;
+   619→      let slot = -1;
+   620→      for (const rowId of rowsOfGroup(t.combo)) {
+   621→        const r = this.world.rows[rowId];
+   622→        const k = r.slots.findIndex(x => x === null);
+   623→        if (k >= 0) { row = r; slot = k; break; }
+   624→      }
+   625→      if (!row || slot < 0) continue;
+   626→      this.seatTape(t.id, row.id, slot, true);
+   627→      shelved++;
+   628→    }
+   629→    this.sortedCount = this.world.tapes.filter(t2 => t2.state === 'shelved').length;
+   630→    this.skills.onShelved(this.sortedCount);
+   631→    this.emitCounters();
+   632→    this.checkCompletion();
+   633→    return shelved;
+   634→  }
+   635→
+   636→  /** data-path seating used by both the drag controller and the test helpers */
+   637→  seatTape(id: number, rowId: number, slot: number, instant = false): void {
+   638→    const t = this.tapeData(id);
+   639→    if (!t) return;
+   640→    const row = this.world.rows[rowId];
+   641→    const view = this.tapeViews.get(id);
+   642→    t.state = 'shelved';
+   643→    t.row = rowId;
+   644→    t.slot = slot;
+   645→    t.rot = 0;
+   646→    row.slots[slot] = id;
+   647→    this.sortedCount = this.world.tapes.filter(tt => tt.state === 'shelved').length;
+   648→    if (view) {
+   649→      view.face.setVisible(false);
+   650→      if (view.overlay) view.overlay.setVisible(false);
+   651→      view.spine.setVisible(true);
+   652→      const p = slotPos(rowId, slot);
+   653→      const u = unitOfRow(rowId);
+   654→      const lr = rowId % ROWS_PER_UNIT;
+   655→      if (instant) {
+   656→        view.container.setPosition(p.x, p.y).setRotation(0).setDepth(unitPos(u).y + 1 + lr * 0.02);
+   657→      }
+   658→    }
+   659→    this.updateRowCount(rowId);
+   660→  }
+   661→
+   662→  /** unshelve (pull-out data path) */
+   663→  unseatTape(id: number): void {
+   664→    const t = this.tapeData(id);
+   665→    if (!t || t.state !== 'shelved') return;
+   666→    const row = this.world.rows[t.row as number];
+   667→    const slot = t.slot as number;
+   668→    if (row.slots[slot] === id) row.slots[slot] = null;
+   669→    t.state = 'loose';
+   670→    t.row = null; t.slot = null;
+   671→    this.updateRowCount(row.id);
+   672→    this.sortedCount = this.world.tapes.filter(tt => tt.state === 'shelved').length;
+   673→  }
+   674→
+   675→  debugRepairAll(): number {
+   676→    let n = 0;
+   677→    for (const t of this.world.tapes) {
+   678→      if (t.defect && !t.repaired) {
+   679→        t.repaired = true;
+   680→        const view = this.tapeViews.get(t.id);
+   681→        if (view && view.overlay) view.overlay.setVisible(false);
+   682→        n++;
+   683→      }
+   684→    }
+   685→    this.emitCounters();
+   686→    return n;
+   687→  }
+   688→
+   689→  debugSetTapePos(id: number, x: number, y: number): void {
+   690→    const t = this.world.tapes.find(tt => tt.id === id);
+   691→    const view = this.tapeViews.get(id);
+   692→    if (!t || !view || t.state !== 'loose' || this.drag.held?.tapes.some(v => v.id === id)) return;
+   693→    t.x = x; t.y = y; t.rot = 0;
+   694→    view.container.setPosition(x, y).setRotation(0).setDepth(y);
+   695→  }
+   696→
+   697→  resizeForTest(w: number, h: number): void {
+   698→    this.game.scale.resize(w, h);
+   699→  }
+   700→}
+   701→

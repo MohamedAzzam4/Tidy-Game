@@ -41,9 +41,16 @@ export interface WorldData {
   rows: Row[];
 }
 
-/** Serialized run (localStorage payload), version 2. */
+/** Serialized run (localStorage payload). v3 = v2 fields + cabinet milestones + settings. */
+export interface SaveSettings {
+  sound: boolean;
+  hoverFx: boolean;
+  pilotArt: boolean;
+  reducedMotion: boolean;
+}
+
 export interface SaveFile {
-  version: 2;
+  version: 2 | 3;
   seed: number;
   savedAt: number;
   tapes: Array<{
@@ -54,6 +61,11 @@ export interface SaveFile {
   skills: Record<string, boolean>;
   powers: Record<string, { unlocked: boolean; activeUntil: number; cooldownUntil: number }>;
   playSeconds: number;
+  /** v3: permanently-granted cabinet completion achievements (unit ids) */
+  achievements?: number[];
+  /** v3: counters + settings (sound/hover/pilot toggles, reduced motion) */
+  milestones?: { rows: number; cabinets: number };
+  settings?: Partial<SaveSettings>;
 }
 
 export type SkillId = 'scanner' | 'guide' | 'misplaced' | 'marquee' | 'matchScan' | 'matchGather';

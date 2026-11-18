@@ -1,12 +1,24 @@
 /**
- * Tidy Tapes — repair overlay scene (three short tactile minigames).
- * Rewind: rotate one reel with a pencil in continuous circular strokes until the
- *   loose brown ribbon returns to its guides.
- * Sticker swap: peel the damaged sticker with tweezers, wipe the adhesive
- *   residue, press a new sticker of the SAME symbol in the same spot.
- * Paint touch-up: rub a matching marker over the small faded patch — the
- *   original color is revealed directly under the stroke.
- * Feedback is restrained: soft sounds, tiny motions, no screen shake.
+ * Tidy Tapes — repair overlay scene (three short tactile minigames), v3.
+ *
+ * Rewind (v3 §8): insert / wind / remove are SEPARATE gestures.
+ *  - Insert: drag the pencil into the circular spool hub — it snaps in cleanly
+ *    and stays anchored (release, pointer-away or a hold never pulls it out;
+ *    inserting does not wind anything).
+ *  - Wind: with the pencil seated, press-and-hold on it (or the hub) and move
+ *    the pointer AROUND the hub — ovals, triangles and sharp corners all count
+ *    (signed angular travel with wrap handling, a center-jitter dead zone and
+ *    a per-step deadband so tiny jitter and short scrubbing cancel out).
+ *    Release stops winding and keeps progress + pencil; resumable. A quiet
+ *    ratchet tick follows actual forward progress only.
+ *  - Remove: double-click the seated pencil to grab it, then drag it outside
+ *    the hub. A double-click alone never ejects it; a normal press-and-hold
+ *    still means winding. When the ribbon is fully rewound the cassette shows
+ *    "ready" and the pencil stays put until removed — only then does the
+ *    visible §7 return flight start (GameScene).
+ *
+ * Sticker swap and paint touch-up keep their v2 flows (peel → wipe → press;
+ * rub-to-reveal). Feedback stays restrained: soft sounds, tiny motions.
  */
 import Phaser from 'phaser';
 import { COLORS, SYMBOLS } from '../config';
@@ -19,6 +31,15 @@ const FACE_H = 60 * SCALE; // 204
 
 const PATCH_X = 18 * SCALE, PATCH_Y = 47 * SCALE;         // paint patch top-left
 const PATCH_W = 24 * SCALE, PATCH_H = 14 * SCALE;
+
+const HUB_R = 34;            // visual hub radius (screen px)
+const SEAT_R = 42;           // snap-acceptance radius around the hub
+const OUT_R = 78;            // release beyond this = pencil removed
+const CENTER_JITTER_R = 16;  // pointer motion inside this is ignored
+const DEADBAND = 0.035;      // rad per step below which nothing accumulates
+const WIND_TARGET = 9.5 * Math.PI; // net signed radians for a full rewind
+
+type PencilState = 'rest' | 'held' | 'seated';
 
 export class RepairScene extends Phaser.Scene {
   constructor() {
@@ -40,10 +61,18 @@ export class RepairScene extends Phaser.Scene {
   // rewind state
   private reel!: Phaser.GameObjects.Container;
   private ribbon!: Phaser.GameObjects.Graphics;
-  private reelAngle = 0;
-  private windProgress = 0;
-  private lastSqueak = 0;
+  private guides!: Phaser.GameObjects.Graphics;
+  private readyTag!: Phaser.GameObjects.Text;
+  private pencil!: Phaser.GameObjects.Image;
+  private pencilState: PencilState = 'rest';
+  private windNet = 0;               // signed accumulated angle (rad)
+  private windProgress = 0;          // 0..1
   private lastPointerAngle: number | null = null;
+  private lastRatchetAt = 0;
+  private lastSqueak = 0;
+  private lastDownAt = 0;
+  private lastDownPos = { x: 0, y: 0 };
+  private removalGrab = false;      // true between "grabbed via double-click" and release
 
   // sticker state
   private phase: 'peel' | 'wipe' | 'place' | 'press' = 'peel';
@@ -72,13 +101,8 @@ export class RepairScene extends Phaser.Scene {
 
   create(): void {
     // Phaser re-uses a stopped scene instance: reset every mutable field
-    // (a previous rewind repair must not leave done=true for the next repair)
     this.success = false;
     this.done = false;
-    this.reelAngle = 0;
-    this.windProgress = 0;
-    this.lastSqueak = 0;
-    this.lastPointerAngle = null;
     this.phase = 'peel';
     this.peelDragStart = null;
     this.peelDist = 0;
@@ -90,6 +114,15 @@ export class RepairScene extends Phaser.Scene {
     this.lastTrail = null;
     this.lastRubSound = 0;
     this.pointerDown = false;
+    this.windNet = 0;
+    this.windProgress = 0;
+    this.lastPointerAngle = null;
+    this.lastRatchetAt = 0;
+    this.lastSqueak = 0;
+    this.lastDownAt = 0;
+    this.lastDownPos = { x: 0, y: 0 };
+    this.removalGrab = false;
+    this.pencilState = 'rest';
 
     const W = this.scale.width;
     const H = this.scale.height;
@@ -128,16 +161,16 @@ export class RepairScene extends Phaser.Scene {
     this.add.image(this.cx, this.cy, `defect-${this.kind}`)
       .setDisplaySize(FACE_W, FACE_H).setAngle(-3);
 
-    // cancel button
+    // cancel button (hidden once the rewind is ready — the pencil must come out)
     const cancel = this.add.text(24, H - 46, '← put it back', {
       fontFamily: 'Georgia, serif', fontSize: '16px', color: '#f6efdd',
       backgroundColor: '#6e4429', padding: { x: 12, y: 7 },
     }).setInteractive({ useHandCursor: true });
     cancel.on('pointerdown', () => this.close(false));
+    this.cancelBtn = cancel;
 
-    // tool cursor (follows pointer, replaces the mouse look)
-    this.tool = this.add.image(0, 0, this.kind === 'rewind' ? 'tool-pencil'
-      : this.kind === 'sticker' ? 'tool-tweezers' : 'tool-marker');
+    // tool cursor (sticker/paint only; rewind uses the pencil as the actor)
+    this.tool = this.add.image(0, 0, this.kind === 'sticker' ? 'tool-tweezers' : 'tool-marker');
     if (this.kind === 'paint') {
       const colorIdx = Math.floor(this.combo / SYMBOLS.length);
       const tint = Phaser.Display.Color.HexStringToColor(COLORS[colorIdx].css).color;
@@ -146,7 +179,7 @@ export class RepairScene extends Phaser.Scene {
     this.tool.setDepth(300).setVisible(false);
     if (this.kind === 'paint') this.tool.setOrigin(0.5, 0); // tip at top
     else this.tool.setOrigin(0.5, 1); // tip at bottom
-    this.input.setDefaultCursor('none');
+    if (this.kind !== 'rewind') this.input.setDefaultCursor('none');
 
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => this.onMove(p));
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => { this.pointerDown = true; this.onDown(p); });
@@ -160,15 +193,24 @@ export class RepairScene extends Phaser.Scene {
     }
   }
 
+  private cancelBtn: Phaser.GameObjects.Text | null = null;
+
   private faceXY(lx: number, ly: number): { x: number; y: number } {
     // local face coords (0..92, 0..60, pre-scale) -> screen
     return { x: this.cx + (lx - 46) * SCALE, y: this.cy + (ly - 30) * SCALE };
   }
 
-
   // ================================================================== REWIND
+  private hub(): { x: number; y: number } {
+    return this.faceXY(58, 38);
+  }
+
+  private pencilHome(): { x: number; y: number } {
+    return { x: this.cx + FACE_W / 2 + 90, y: this.cy + 96 };
+  }
+
   private setupRewind(): void {
-    this.instruction.setText('The ribbon spilled out. Hold the pencil on the right reel and wind in one continuous circular motion until the ribbon returns to its guides.');
+    this.instruction.setText('The ribbon spilled out. Drag the pencil into the round spool hub; when it snaps in, hold it and wind in circles (rough ovals and triangles are fine).');
 
     const lp = this.faceXY(34, 38); // left reel (already wound)
     const reelL = this.add.graphics();
@@ -176,7 +218,7 @@ export class RepairScene extends Phaser.Scene {
     reelL.strokeCircle(lp.x, lp.y, 24);
 
     // spinning right reel
-    const rp = this.faceXY(58, 38);
+    const rp = this.hub();
     this.reel = this.add.container(rp.x, rp.y);
     const reelImg = this.add.image(0, 0, this.makeReelTexture());
     this.reel.add(reelImg);
@@ -186,10 +228,24 @@ export class RepairScene extends Phaser.Scene {
     this.drawRibbon();
 
     // guide marks (where the ribbon must return)
-    const guides = this.add.graphics();
-    guides.lineStyle(2.5, 0x9fe6a0, 0.85);
+    this.guides = this.add.graphics();
+    this.guides.lineStyle(2.5, 0x9fe6a0, 0.85);
     const g1 = this.faceXY(75, 42);
-    guides.strokeRoundedRect(g1.x - 9, g1.y - 4, 18, 8, 2);
+    this.guides.strokeRoundedRect(g1.x - 9, g1.y - 4, 18, 8, 2);
+
+    // ready tag (shown when the ribbon is fully rewound)
+    this.readyTag = this.add.text(rp.x, rp.y - 72, 'ready', {
+      fontFamily: 'Georgia, serif', fontSize: '13px', fontStyle: 'bold', color: '#9fe6a0',
+      backgroundColor: 'rgba(40,60,40,0.85)', padding: { x: 8, y: 3 },
+    }).setOrigin(0.5).setVisible(false);
+
+    // the pencil: tip at its bottom (origin 0.5,1); rests on the side tray
+    const home = this.pencilHome();
+    this.pencil = this.add.image(home.x, home.y, 'tool-pencil')
+      .setOrigin(0.5, 1).setDisplaySize(17, 58).setDepth(120).setRotation(0.22);
+    this.add.text(home.x, home.y + 8, 'pencil', {
+      fontFamily: 'Georgia, serif', fontSize: '11px', color: '#cdbfa5',
+    }).setOrigin(0.5, 0);
   }
 
   private makeReelTexture(): string {
@@ -236,7 +292,6 @@ export class RepairScene extends Phaser.Scene {
       g.lineTo(x, y);
     }
     g.strokePath();
-    // sagging loop on the cassette (quadratic sampled manually — Graphics has no curve API)
     if (p > 0.25) {
       g.lineStyle(4, 0x7a4a2a, 0.8);
       g.beginPath();
@@ -253,34 +308,116 @@ export class RepairScene extends Phaser.Scene {
     }
   }
 
+  private nearPencil(p: Phaser.Input.Pointer): boolean {
+    if (!this.pencil) return false;
+    const mid = { x: this.pencil.x, y: this.pencil.y - 26 };
+    return Math.hypot(p.x - mid.x, p.y - mid.y) < 38;
+  }
+
+  private nearHub(p: Phaser.Input.Pointer): boolean {
+    const h = this.hub();
+    return Math.hypot(p.x - h.x, p.y - h.y) < 96;
+  }
+
+  private pencilTip(): { x: number; y: number } {
+    return { x: this.pencil.x, y: this.pencil.y };
+  }
+
   private updateRewind(p: Phaser.Input.Pointer): void {
-    const rp = this.faceXY(58, 38);
-    const near = Math.hypot(p.x - rp.x, p.y - rp.y) < 90;
-    this.tool.setVisible(true);
-    if (this.pointerDown && near) {
-      // pencil engaged at the hub (tip on the reel)
-      this.tool.setPosition(rp.x, rp.y);
-      const ang = Math.atan2(p.y - rp.y, p.x - rp.x);
-      if (this.lastPointerAngle !== null) {
-        let d = ang - this.lastPointerAngle;
-        while (d > Math.PI) d -= Math.PI * 2;
-        while (d < -Math.PI) d += Math.PI * 2;
-        this.windProgress = Math.min(1, this.windProgress + Math.abs(d) / (Math.PI * 12));
-        this.reelAngle += d * 2;
-        this.reel.setRotation(this.reelAngle);
-        if (this.time.now - this.lastSqueak > 420 && Math.abs(d) > 0.04) {
-          this.lastSqueak = this.time.now;
-          audio.play('squeak');
+    const h = this.hub();
+
+    // ---- pencil held for removal (double-click grab): follows the pointer, never winds
+    if (this.pencilState === 'held') {
+      this.pencil.setPosition(p.x, p.y).setRotation(0);
+      return;
+    }
+
+    // ---- seated: press-and-hold near the hub = WINDING (the §8 core)
+    if (this.pencilState === 'seated') {
+      // tip anchored in the hub — the pencil NEVER drifts while winding
+      this.pencil.setPosition(h.x, h.y);
+      if (this.pointerDown && !this.removalGrab && this.nearHub(p)) {
+        const distToHub = Math.hypot(p.x - h.x, p.y - h.y);
+        if (distToHub > CENTER_JITTER_R) {
+          const ang = Math.atan2(p.y - h.y, p.x - h.x);
+          if (this.lastPointerAngle !== null) {
+            let d = ang - this.lastPointerAngle;
+            while (d > Math.PI) d -= Math.PI * 2;      // wrap-safe
+            while (d < -Math.PI) d += Math.PI * 2;
+            if (Math.abs(d) >= DEADBAND) {
+              // free signed accumulation: forward winding adds, reverse unwinds,
+              // and quick back-and-forth scrubbing cancels itself out
+              this.windNet += d;
+              const prev = this.windProgress;
+              this.windProgress = Math.min(1, Math.abs(this.windNet) / WIND_TARGET);
+              // pencil leans toward the pointer while staying pinned at the hub
+              this.pencil.setRotation(ang + Math.PI / 2);
+              this.reel.setRotation(this.windNet);
+              if (this.windProgress !== prev) this.drawRibbon();
+              const now = this.time.now;
+              if (this.windProgress > prev && now - this.lastRatchetAt > 90) {
+                this.lastRatchetAt = now;
+                audio.play('ratchet');
+              }
+              if (this.windProgress >= 1) this.markReady();
+            } else {
+              // sub-deadband motion: scrubbing/jitter — tracked but never counts
+              this.pencil.setRotation(ang + Math.PI / 2);
+            }
+          }
+          this.lastPointerAngle = ang;
+        } else {
+          this.lastPointerAngle = null; // ignore motion hugging the center
         }
+      } else {
+        this.lastPointerAngle = null;
       }
-      this.lastPointerAngle = ang;
-      this.drawRibbon();
-      if (this.windProgress >= 1) this.finishRepair();
-    } else {
-      this.lastPointerAngle = null;
-      this.tool.setPosition(p.x, p.y);
+      return;
+    }
+
+    // ---- resting: press near the pencil to drag it toward the hub
+    if (this.pointerDown && this.nearPencil(p)) {
+      this.pencilState = 'held';
+      this.removalGrab = true; // a plain press-drag also lifts it (insert path)
     }
   }
+
+  private markReady(): void {
+    if (this.done) return;
+    this.done = true;          // winding is finished (repair succeeded)
+    this.success = true;
+    this.readyTag.setVisible(true);
+    this.guides.lineStyle(3, 0xffe9a8, 0.95);
+    const g1 = this.faceXY(75, 42);
+    this.guides.strokeRoundedRect(g1.x - 11, g1.y - 6, 22, 12, 3);
+    this.instruction.setText('Ready — the ribbon is rewound. Double-click the pencil and drag it out of the hub to finish.');
+    this.cancelBtn?.setVisible(false);
+    audio.play('press'); // soft blip (the Tiny Chime stays reserved for milestones/verify)
+  }
+
+  // =============================================================== completion
+  private finishRepair(): void {
+    if (this.finished) return;
+    this.finished = true;
+    this.done = true;
+    this.success = true;
+    this.instruction.setText('There — good as new.');
+    audio.play('press');
+    // restrained sparkle: three small dots
+    const spot = this.kind === 'sticker' ? this.faceXY(21, 13.5)
+      : this.kind === 'paint' ? { x: this.cx - FACE_W / 2 + PATCH_X + PATCH_W / 2, y: this.cy - FACE_H / 2 + PATCH_Y + PATCH_H / 2 }
+      : this.hub();
+    for (let i = 0; i < 3; i++) {
+      const s = this.add.image(spot.x, spot.y, 'dot').setDisplaySize(12, 12).setTint(0xffe9a8).setAlpha(0.9);
+      this.tweens.add({
+        targets: s, y: spot.y - 26 - i * 8, alpha: 0, duration: 700, delay: i * 120, ease: 'sine.easeout',
+        onComplete: () => s.destroy(),
+      });
+    }
+    this.time.delayedCall(720, () => this.close(true));
+  }
+
+  private finished = false;
 
   // ================================================================= STICKER
   private setupSticker(): void {
@@ -410,7 +547,6 @@ export class RepairScene extends Phaser.Scene {
         this.pressGfx.strokePath();
         if (held >= 600) {
           this.pressGfx.clear();
-          audio.play('press');
           this.finishRepair();
         }
       } else {
@@ -474,27 +610,7 @@ export class RepairScene extends Phaser.Scene {
     }
   }
 
-  // =============================================================== completion
-  private finishRepair(): void {
-    if (this.done) return;
-    this.done = true;
-    this.success = true;
-    this.instruction.setText('There — good as new.');
-    audio.play('press'); // soft blip — the Tiny Chime is reserved for verified results
-    // restrained sparkle: three small dots
-    const spot = this.kind === 'sticker' ? this.faceXY(21, 13.5)
-      : this.kind === 'paint' ? { x: this.cx - FACE_W / 2 + PATCH_X + PATCH_W / 2, y: this.cy - FACE_H / 2 + PATCH_Y + PATCH_H / 2 }
-      : this.faceXY(58, 38);
-    for (let i = 0; i < 3; i++) {
-      const s = this.add.image(spot.x, spot.y, 'dot').setDisplaySize(12, 12).setTint(0xffe9a8).setAlpha(0.9);
-      this.tweens.add({
-        targets: s, y: spot.y - 26 - i * 8, alpha: 0, duration: 700, delay: i * 120, ease: 'sine.easeout',
-        onComplete: () => s.destroy(),
-      });
-    }
-    this.time.delayedCall(850, () => this.close(true));
-  }
-
+  // =============================================================== scene flow
   private close(success: boolean): void {
     this.game.events.emit('repair:closed', { id: this.tapeId, success });
     this.scene.resume('Game');
@@ -502,19 +618,28 @@ export class RepairScene extends Phaser.Scene {
   }
 
   update(): void {
-    // sticker press-and-hold needs per-frame evaluation (a pure hold
-    // produces no pointer events)
-    if (this.kind === 'sticker' && this.phase === 'press' && !this.done) {
-      this.updateSticker(this.input.activePointer);
+    // per-frame evaluation (a pure hold produces no pointermove events)
+    const p = this.input.activePointer;
+    if (!this.done || this.kind === 'rewind') {
+      if (this.kind === 'rewind') this.updateRewind(p);
+      else if (this.kind === 'sticker' && this.phase === 'press' && !this.finished) this.updateSticker(p);
     }
     // live state probe for the test harness (autotest pages only)
     if (window.location.search.includes('autotest')) {
       (window as unknown as { __repair?: unknown }).__repair = {
-        kind: this.kind, phase: this.phase, done: this.done,
+        kind: this.kind, phase: this.phase, done: this.done, finished: this.finished,
         peelDist: Math.round(this.peelDist), wipeDist: Math.round(this.wipeDist),
         wind: Math.round(this.windProgress * 100) / 100,
         coverage: this.coverage.size, rubDist: Math.round(this.rubDist),
         pdown: this.pointerDown,
+        pencil: this.pencil
+          ? {
+            state: this.pencilState,
+            x: Math.round(this.pencil.x), y: Math.round(this.pencil.y),
+            removalGrab: this.removalGrab,
+          }
+          : null,
+        hub: (() => { const h = this.hub(); return { x: Math.round(h.x), y: Math.round(h.y) }; })(),
         cx: Math.round(this.cx), cy: Math.round(this.cy),
       };
     }
@@ -522,22 +647,75 @@ export class RepairScene extends Phaser.Scene {
 
   // ------------------------------------------------------------------ input
   private onMove(p: Phaser.Input.Pointer): void {
-    if (this.done) return;
+    if (this.finished && this.kind !== 'rewind') return;
     if (this.kind === 'rewind') this.updateRewind(p);
     else if (this.kind === 'sticker') this.updateSticker(p);
     else this.updatePaint(p);
   }
 
   private onDown(p: Phaser.Input.Pointer): void {
-    if (this.done) return;
-    if (this.kind === 'rewind') this.updateRewind(p);
-    else if (this.kind === 'sticker') this.updateSticker(p);
+    if (this.finished && this.kind !== 'rewind') return;
+    const now = this.time.now;
+    const quickDouble = now - this.lastDownAt < 300
+      && Math.hypot(p.x - this.lastDownPos.x, p.y - this.lastDownPos.y) < 22;
+    this.lastDownAt = now;
+    this.lastDownPos = { x: p.x, y: p.y };
+
+    if (this.kind === 'rewind') {
+      // double-click the SEATED pencil: grab it for removal (never ejects here)
+      if (this.pencilState === 'seated' && quickDouble && this.nearHub(p)) {
+        this.pencilState = 'held';
+        this.removalGrab = true;
+        audio.play('pickup');
+        return;
+      }
+      this.updateRewind(p);
+      return;
+    }
+    if (this.kind === 'sticker') this.updateSticker(p);
     else this.updatePaint(p);
   }
 
   private onUp(p: Phaser.Input.Pointer): void {
     this.lastPointerAngle = null;
     this.lastTrail = null;
+    if (this.kind === 'rewind') {
+      if (this.pencilState === 'held') {
+        const h = this.hub();
+        const tip = this.pencilTip();
+        const inHub = Math.hypot(tip.x - h.x, tip.y - h.y) <= SEAT_R;
+        if (inHub) {
+          // snap cleanly into place; inserting never winds anything
+          this.pencilState = 'seated';
+          this.removalGrab = false;
+          this.tweens.add({
+            targets: this.pencil, x: h.x, y: h.y, rotation: 0,
+            duration: 130, ease: 'back.easeout',
+          });
+          audio.play('place');
+        } else if (Math.hypot(tip.x - h.x, tip.y - h.y) > OUT_R) {
+          // deliberately removed
+          const home = this.pencilHome();
+          this.pencilState = 'rest';
+          this.removalGrab = false;
+          this.tweens.add({
+            targets: this.pencil, x: home.x, y: home.y, rotation: 0.22,
+            duration: 260, ease: 'cubic.easeout',
+          });
+          audio.play('place');
+          if (this.done && this.success) {
+            // rewound + pencil out: the visible §7 return flight starts now
+            this.time.delayedCall(340, () => this.close(true));
+            this.finished = true;
+          }
+        } else {
+          // released in the corridor: keep it held-free, rest where it is
+          this.pencilState = 'rest';
+          this.removalGrab = false;
+        }
+      }
+      return;
+    }
     if (this.kind === 'sticker') {
       this.peelDragStart = null;
       if (this.phase === 'place' && this.draggingSticker) {

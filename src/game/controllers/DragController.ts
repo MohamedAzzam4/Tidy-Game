@@ -1,26 +1,37 @@
 /**
- * Tidy Tapes — drag & drop controller (v2).
+ * Tidy Tapes — drag & drop controller (v3).
+ *
+ * Input scheme (v3 §5): LEFT button = interaction + navigation. A left press on
+ * a tape arms a drag behind a small movement threshold (click vs drag); a left
+ * press on empty table pans (no Space needed; Space+drag still works). The
+ * RIGHT button draws the marquee selection rectangle once Marquee Pickup is
+ * unlocked (it does not pan); before unlock right-drag pans like v2. Wheel zoom
+ * and touch (one-finger pan + two-finger pinch) are preserved.
+ *
+ * Double-left-click a tape loads that ONE tape into the first empty carry-tray
+ * slot (basic, pre-skill; works loose or removable-shelved; a full tray leaves
+ * the tape exactly where it was). Double-clicks never move a selection, never
+ * fire twice, and never trigger skills: single-click actions are deferred
+ * ~240 ms and canceled by the second click of a pair. The old defective-tape
+ * double-click repair opener is rebinded to the R key.
  *
  * Cursor-accurate rule (kept from v1): the grab offset is recomputed from the
- * ACTIVE camera every frame, so panning/zooming with a stationary pointer keeps
- * the exact grab point under the cursor; the held tape itself is never tweened.
- *
- * v2 semantics:
- *  - ANY row with a free slot accepts ANY tape (hidden correctness: identical
- *    preview, motion and sound for matching and misfiled placements).
- *  - seated spines can be pulled back out and re-filed.
- *  - a five-slot carry tray (screen-fixed) loads/drops tapes and batches into rows.
- *  - insertion is a three-beat move: align over the opening, turn broad face ->
- *    edge-on, slide under the unit's lip (foreground) into the seat.
+ * ACTIVE camera every frame. Insertion keeps the three-beat align → turn →
+ * slide-under-the-lip move, now with pose-correct scale math (v3 §1) and the
+ * milestone check firing exactly when the tape finishes seating (v3 §4).
  */
 import Phaser from 'phaser';
 import {
-  INSERT_ALIGN_MS, INSERT_SLIDE_MS, INSERT_STAGGER_MS, INSERT_TURN_MS,
-  SPINE_H, SPINE_W, UNITS, UNIT_H, UNIT_W, benchRect, rowRect, slotPos,
-  trayScreenRect, unitOfRow, unitPos,
+  CLICK_MOVE_THRESHOLD, DEFERRED_CLICK_MS, DOUBLE_CLICK_MS, INSERT_ALIGN_MS,
+  INSERT_SLIDE_MS, INSERT_STAGGER_MS, INSERT_TURN_MS,
+  UNITS, UNIT_H, UNIT_W, benchRect, rowRect, slotPos,
+  trayScreenRect, unitOfRow, unitPos, isPilotUnit,
 } from '../config';
 import { defectBlocksFiling } from '../types';
 import { audio } from '../audio';
+import {
+  looseSpec, spineSpec, turnSpec, setLoosePose, setSeatedPose, LOOSE_HIT,
+} from '../poses';
 import type { GameScene, TapeView } from '../scenes/GameScene';
 import type { SkillsController } from './SkillsController';
 import type { Row, Tape } from '../types';
@@ -38,6 +49,14 @@ interface Held {
   downScreen: { x: number; y: number };
 }
 
+/** a press on a tape waiting for the click/drag threshold */
+interface PendingTape {
+  view: TapeView;
+  pointerId: number;
+  downScreen: { x: number; y: number };
+  downAt: number;
+}
+
 const FAN: [number, number][] = [
   [0, 0], [-58, 42], [58, 42], [0, 78], [116, 42], [-116, 42], [174, 42], [-174, 42], [232, 42],
 ];
@@ -52,12 +71,16 @@ export class DragController {
   private ghostSpine: Phaser.GameObjects.Image;
   private hoverRow: number | null = null;
   private panDrag: { pointerId: number; last: { x: number; y: number } } | null = null;
+  private pendingTape: PendingTape | null = null;
   private touchPan: {
     pointers: number[];
     centroid: { x: number; y: number };
     dist: number;
   } | null = null;
   private fxGfx: Phaser.GameObjects.Graphics;
+  // click bookkeeping (double-click detection + deferred single clicks)
+  private lastClick: { id: number; x: number; y: number; at: number } | null = null;
+  private deferredClick: { view: TapeView; timer: Phaser.Time.TimerEvent } | null = null;
 
   constructor(scene: GameScene) {
     this.scene = scene;
@@ -66,22 +89,13 @@ export class DragController {
     this.fxGfx = scene.add.graphics().setDepth(150010);
   }
 
+  panDragActive(): boolean { return this.panDrag !== null; }
+
   // ------------------------------------------------------------------ pickup
   onPointerDown(pointer: Phaser.Input.Pointer): void {
     const cam = this.scene.cameras.main;
     const wp = cam.getWorldPoint(pointer.x, pointer.y);
-
-    // right/middle button: pan
-    if (pointer.rightButtonDown()) {
-      this.panDrag = { pointerId: pointer.id, last: { x: pointer.x, y: pointer.y } };
-      return;
-    }
-
-    // Space+drag: pan (never conflicts with pickup — even over a tape)
-    if (this.scene.keys?.SPACE?.isDown) {
-      this.panDrag = { pointerId: pointer.id, last: { x: pointer.x, y: pointer.y } };
-      return;
-    }
+    this.pendingTape = null;
 
     // touch: two-finger pinch (zoom + pan); never conflicts with drag or selection
     if (pointer.wasTouch) {
@@ -107,29 +121,55 @@ export class DragController {
       }
     }
 
-    // loose tape pickup?
-    const looseView = this.looseTapeAtWorld(wp.x, wp.y);
-    if (looseView && this.held === null) {
-      this.beginDrag(looseView, pointer);
+    // RIGHT button: marquee once unlocked (does NOT pan); pans before unlock (v2)
+    if (pointer.rightButtonDown()) {
+      if (this.skills?.unlocked.marquee && !pointer.wasTouch) {
+        this.skills.beginMarquee(wp, pointer.id);
+      } else {
+        this.panDrag = { pointerId: pointer.id, last: { x: pointer.x, y: pointer.y } };
+      }
       return;
     }
-
-    // seated spine? pull it back out (mistakes are always recoverable)
-    const seatedView = this.seatedTapeAtWorld(wp.x, wp.y);
-    if (seatedView && this.held === null) {
-      this.pullOut(seatedView, pointer);
-      return;
-    }
-
-    // empty-table gesture: marquee only when unlocked (touch needs Select mode);
-    // before unlock the gesture pans the camera (no batch pickup possible).
-    const marqueeArmed =
-      !!this.skills?.unlocked.marquee && (!pointer.wasTouch || this.skills.selectMode);
-    if (marqueeArmed && !pointer.rightButtonDown()) {
-      this.skills.beginMarquee(wp, pointer.id);
-    } else {
+    if (pointer.middleButtonDown && pointer.middleButtonDown()) {
       this.panDrag = { pointerId: pointer.id, last: { x: pointer.x, y: pointer.y } };
+      return;
     }
+
+    // Space+drag: pan (never conflicts with pickup — even over a tape)
+    if (this.scene.keys?.SPACE?.isDown) {
+      this.panDrag = { pointerId: pointer.id, last: { x: pointer.x, y: pointer.y } };
+      return;
+    }
+
+    // touch in explicit Select mode: empty-table drag draws the marquee (v2 kept)
+    if (pointer.wasTouch && this.skills?.selectMode && this.skills?.unlocked.marquee) {
+      const loose = this.looseTapeAtWorld(wp.x, wp.y);
+      const seated = this.seatedTapeAtWorld(wp.x, wp.y);
+      if (!loose && !seated) {
+        this.skills.beginMarquee(wp, pointer.id);
+        return;
+      }
+    }
+
+    // LEFT button over a tape: arm a threshold-gated pickup (click vs drag)
+    const looseView = this.looseTapeAtWorld(wp.x, wp.y);
+    const seatedView = this.seatedTapeAtWorld(wp.x, wp.y);
+    if ((looseView || seatedView) && this.held === null) {
+      const view = (looseView ?? seatedView) as TapeView;
+      this.pendingTape = {
+        view, pointerId: pointer.id,
+        downScreen: { x: pointer.x, y: pointer.y },
+        downAt: this.scene.time.now,
+      };
+      return;
+    }
+
+    // empty table: LEFT drag pans (v3 §5 — no Space, no mode toggle)
+    this.panDrag = { pointerId: pointer.id, last: { x: pointer.x, y: pointer.y } };
+  }
+
+  looseTapeAtWorldPublic(x: number, y: number): TapeView | null {
+    return this.looseTapeAtWorld(x, y);
   }
 
   private looseTapeAtWorld(x: number, y: number): TapeView | null {
@@ -145,7 +185,7 @@ export class DragController {
       const sin = Math.sin(-c.rotation);
       const lx = dx * cos - dy * sin;
       const ly = dx * sin + dy * cos;
-      if (Math.abs(lx) <= 46 && Math.abs(ly) <= 30 && c.depth > bestDepth) {
+      if (Math.abs(lx) <= LOOSE_HIT.w / 2 && Math.abs(ly) <= LOOSE_HIT.h / 2 && c.depth > bestDepth) {
         best = view;
         bestDepth = c.depth;
       }
@@ -158,7 +198,13 @@ export class DragController {
       const t = this.scene.tapeData(view.id) as Tape;
       if (t.state !== 'shelved') continue;
       const c = view.container;
-      if (Math.abs(x - c.x) <= SPINE_W / 2 + 5 && Math.abs(y - c.y) <= SPINE_H / 2 + 5) return view;
+      const u = unitOfRow(t.row as number);
+      if (isPilotUnit(u)) {
+        // taller visible spine above the seat point
+        if (Math.abs(x - c.x) <= 12 && y >= c.y - 68 && y <= c.y + 6) return view;
+      } else if (Math.abs(x - c.x) <= 13 && Math.abs(y - c.y) <= 19) {
+        return view;
+      }
     }
     return null;
   }
@@ -183,7 +229,10 @@ export class DragController {
       const c = v.container;
       origin.set(v.id, { x: c.x, y: c.y, rot: c.rotation });
       c.setDepth(100000 + i);
-      // small pickup pop (juice, not lag — position still tracks the pointer)
+      // any live hover-nudge offset dies the instant the tape is picked up
+      this.scene.nudge?.resetTape(v);
+      // small pickup pop (juice, not lag — position still tracks the pointer;
+      // scale returns to exactly 1 before any other pose transition)
       this.scene.tweens.add({
         targets: c, scaleX: { from: 1, to: 1.05 }, scaleY: { from: 1, to: 1.05 },
         duration: 70, yoyo: true, ease: 'sine.easeout',
@@ -207,18 +256,16 @@ export class DragController {
     this.skills.onGrabSelection(lead.id);
   }
 
-  /** pull a seated tape out of its slot (flip to broad face + begin drag) */
+  /** pull a seated tape out of its slot (canonical loose pose + begin drag) */
   private pullOut(view: TapeView, pointer: Phaser.Input.Pointer): void {
     const cam = this.scene.cameras.main;
     const wp = cam.getWorldPoint(pointer.x, pointer.y);
     const t = this.scene.tapeData(view.id) as Tape;
     this.scene.unseatTape(t.id);
     const c = view.container;
-    view.face.setVisible(true);
-    view.spine.setVisible(false);
-    if (view.overlay) view.overlay.setVisible(t.defect !== null && !t.repaired);
-    c.setSize(92, 60);
-    c.setInteractive(new Phaser.Geom.Rectangle(-46, -30, 92, 60), Phaser.Geom.Rectangle.Contains);
+    // §1: restore the EXACT loose dimensions, origin and hit area; kill any
+    // tween left over from the insertion (the oversized-tape bug)
+    setLoosePose(this.scene, view, t);
     t.x = c.x; t.y = c.y; t.rot = 0;
     this.beginDrag(view, pointer);
     this.scene.emitCounters();
@@ -277,16 +324,70 @@ export class DragController {
     const cam = scene.cameras.main;
     const wp = cam.getWorldPoint(pointer.x, pointer.y);
     const c = view.container;
-    view.face.setVisible(true).setAlpha(1).setScale(1);
-    view.spine.setVisible(false);
-    if (view.overlay) view.overlay.setVisible(t.defect !== null && !t.repaired);
-    c.setVisible(true).setPosition(wp.x, wp.y).setRotation(0).setScale(1).setAlpha(1);
-    c.setSize(92, 60);
-    c.setInteractive(new Phaser.Geom.Rectangle(-46, -30, 92, 60), Phaser.Geom.Rectangle.Contains);
+    setLoosePose(scene, view, t);
+    c.setVisible(true).setPosition(wp.x, wp.y).setRotation(0).setAlpha(1);
     t.state = 'loose';
     t.x = wp.x; t.y = wp.y; t.rot = 0; t.row = null; t.slot = null;
     scene.emitCounters();
     this.beginDrag(view, pointer, true);
+  }
+
+  // ------------------------------------------------------- click vs double-click
+  /**
+   * A quick press+release without crossing the threshold on a tape.
+   * Second click on the SAME tape within the window = double-click → tray
+   * shortcut. Otherwise the single-click action (guide / powers) is deferred
+   * and canceled if a second click arrives.
+   */
+  private onTapeClick(view: TapeView, pointer: Phaser.Input.Pointer): void {
+    const t = this.scene.tapeData(view.id) as Tape | undefined;
+    if (!t) return;
+    const now = this.scene.time.now;
+    const last = this.lastClick;
+    if (last && last.id === view.id && now - last.at < DOUBLE_CLICK_MS
+      && Math.hypot(pointer.x - last.x, pointer.y - last.y) < 24) {
+      // double-click: tray shortcut (one tape, first empty slot, never a skill)
+      if (this.deferredClick) {
+        this.deferredClick.timer.remove(false);
+        this.deferredClick = null;
+      }
+      this.lastClick = null;
+      this.trayShortcut(view);
+      return;
+    }
+    this.lastClick = { id: view.id, x: pointer.x, y: pointer.y, at: now };
+    if (this.deferredClick) {
+      this.deferredClick.timer.remove(false);
+      this.deferredClick = null;
+    }
+    const timer = this.scene.time.delayedCall(DEFERRED_CLICK_MS, () => {
+      this.deferredClick = null;
+      this.skills?.onTapeClick(view.id);
+    });
+    this.deferredClick = { view, timer };
+  }
+
+  /** double-left-click → move that ONE tape into the first empty tray slot */
+  private trayShortcut(view: TapeView): void {
+    const scene = this.scene;
+    const t = scene.tapeData(view.id);
+    if (!t) return;
+    if (scene.trayFreeSlots() === 0) {
+      // a full tray never swallows the tape: it stays exactly where it was
+      audio.play('invalid');
+      scene.game.events.emit('hint', 'Tray full (5/5) — remove a tape first');
+      return;
+    }
+    if (t.state === 'shelved') {
+      // removable shelved tape: pull it out through the real data path, then load
+      scene.unseatTape(t.id);
+      setLoosePose(scene, view, t);
+      scene.emitCounters();
+    }
+    if (t.state !== 'loose') return;
+    scene.trayLoad(t.id); // stows the world view + flashes the tray slot
+    audio.play('place');
+    scene.emitCounters();
   }
 
   // ------------------------------------------------------------------- frame
@@ -321,6 +422,19 @@ export class DragController {
     if (this.held === null && this.skills?.marqueeActive && pointer.id === this.skills.marqueePointerId) {
       const wp = this.scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
       this.skills.updateMarquee(wp);
+      return;
+    }
+    // threshold crossing turns an armed tape press into a real pickup/drag
+    if (this.pendingTape && pointer.id === this.pendingTape.pointerId && this.held === null) {
+      const moved = Math.hypot(pointer.x - this.pendingTape.downScreen.x, pointer.y - this.pendingTape.downScreen.y);
+      if (moved >= CLICK_MOVE_THRESHOLD) {
+        const { view } = this.pendingTape;
+        const t = this.scene.tapeData(view.id) as Tape | undefined;
+        this.pendingTape = null;
+        if (!t) return;
+        if (t.state === 'shelved') this.pullOut(view, pointer);
+        else this.beginDrag(view, pointer);
+      }
     }
   }
 
@@ -388,20 +502,33 @@ export class DragController {
       return;
     }
     const p = slotPos(rowId, slot);
+    const u = unitOfRow(rowId);
+    const pilot = isPilotUnit(u);
+    const spec = spineSpec(0, u); // size template for this cabinet family
     this.hoverGlow.clear().setVisible(true);
     this.hoverGlow.lineStyle(2.5, 0xf6efdd, 0.95);
     this.hoverGlow.fillStyle(0xf6efdd, 0.12);
-    this.hoverGlow.fillRoundedRect(p.x - 10, p.y - SPINE_H / 2 - 2, 20, SPINE_H + 4, 4);
-    this.hoverGlow.strokeRoundedRect(p.x - 10, p.y - SPINE_H / 2 - 2, 20, SPINE_H + 4, 4);
+    const gy = pilot ? p.y - spec.h - 3 : p.y - spec.h / 2 - 3;
+    const gh = spec.h + (pilot ? 8 : 6);
+    this.hoverGlow.fillRoundedRect(p.x - spec.w / 2 - 2, gy, spec.w + 4, gh, 4);
+    this.hoverGlow.strokeRoundedRect(p.x - spec.w / 2 - 2, gy, spec.w + 4, gh, 4);
     const leadTape = this.held ? this.scene.tapeData(this.held.lead.id) as Tape : null;
     if (leadTape) {
-      this.ghostSpine.setTexture(`spine-${leadTape.combo}`).setPosition(p.x, p.y).setVisible(true);
+      this.ghostSpine.setTexture(`spine-${leadTape.combo}`)
+        .setOrigin(spec.origin[0], spec.origin[1])
+        .setDisplaySize(spec.w, spec.h)
+        .setPosition(p.x, p.y)
+        .setVisible(true);
     }
   }
 
   // -------------------------------------------------------------------- drop
   onPointerUp(pointer: Phaser.Input.Pointer): void {
-    if (this.panDrag) { this.panDrag = null; return; }
+    if (this.panDrag) {
+      this.panDrag = null;
+      // a click on empty table (no drag) clears the selection — quick deselect
+      return;
+    }
     if (this.touchPan) { this.touchPan = null; return; }
     if (this.skills?.marqueeActive) {
       this.skills.endMarquee();
@@ -411,18 +538,18 @@ export class DragController {
       if (pointer.id === this.trayBatchDrag.pointerId) this.resolveTrayBatch(pointer);
       return;
     }
-    const held = this.held;
-    if (!held) return;
-
-    // click (no drag, quick): selection for Slot Guide / powers / repair open
-    const moved = Math.hypot(pointer.x - held.downScreen.x, pointer.y - held.downScreen.y);
-    const elapsed = this.scene.time.now - held.downAt;
-    if (moved < 7 && elapsed < 260) {
-      this.returnHeldToOrigin(held);
-      this.held = null;
-      this.skills.onTapeClick(held.lead.id);
+    // armed press that never crossed the threshold = CLICK on a tape
+    if (this.pendingTape && pointer.id === this.pendingTape.pointerId) {
+      const { view, downAt, downScreen } = this.pendingTape;
+      this.pendingTape = null;
+      const moved = Math.hypot(pointer.x - downScreen.x, pointer.y - downScreen.y);
+      if (moved < CLICK_MOVE_THRESHOLD && this.scene.time.now - downAt < 400) {
+        this.onTapeClick(view, pointer);
+      }
       return;
     }
+    const held = this.held;
+    if (!held) return;
 
     const cam = this.scene.cameras.main;
     const wp = cam.getWorldPoint(pointer.x, pointer.y);
@@ -532,10 +659,8 @@ export class DragController {
       this.scene.trayRemoveTape(v.id);
       const t = this.scene.tapeData(v.id) as Tape;
       const p = slotPos(row.id, 0);
-      v.container.setVisible(true).setPosition(p.x, p.y - 60).setRotation(0).setAlpha(1).setScale(1);
-      v.face.setVisible(true);
-      v.spine.setVisible(false);
-      if (v.overlay) v.overlay.setVisible(t.defect !== null && !t.repaired);
+      setLoosePose(this.scene, v, t);
+      v.container.setVisible(true).setPosition(p.x, p.y - 60).setRotation(0).setAlpha(1);
       t.state = 'loose';
       t.x = p.x; t.y = p.y - 60; t.rot = 0;
     }
@@ -562,6 +687,7 @@ export class DragController {
   /**
    * Slot reservation happens immediately (race-free, save-consistent);
    * presentation: align -> turn -> slide under the lip, staggered per tape.
+   * The milestone check fires when each tape finishes seating.
    */
   private commitBatchInsert(
     tapes: TapeView[], rowId: number, wpX: number, held: Held | null, fromTray = false,
@@ -607,46 +733,92 @@ export class DragController {
 
   /**
    * The money shot: align over the opening, turn broad-face -> edge-on, slide a
-   * short visible distance under the unit lip, seat with a soft tuck.
+   * short visible distance under the unit lip, seat with a soft tuck — using
+   * each pose's EXPLICIT display sizes (never the previous sprite's scale).
    */
   private animateInsert(view: TapeView, rowId: number, slot: number, delayMs: number): void {
     const scene = this.scene;
+    const tape = scene.tapeData(view.id) as Tape;
     const target = slotPos(rowId, slot);
     const u = unitOfRow(rowId);
     const lr = rowId % 4;
     const seatDepth = unitPos(u).y + 1 + lr * 0.02;
     const slideDepth = unitPos(u).y + 1.5; // under the lip overlay, over the body
     const c = view.container;
+    const loose = looseSpec(tape.combo);
+    const spine = spineSpec(tape.combo, u);
+    const turn = isPilotUnit(u) ? turnSpec(tape.combo) : null;
+    const standOff = isPilotUnit(u) ? 44 : 40;
+
     scene.time.delayedCall(delayMs, () => {
       if (view.overlay) view.overlay.setVisible(false);
       audio.play('tuck'); // soft descending shff starts as the tape begins to enter
+      const trace = window.location.search.includes('autotest') ? (m: string) => console.log('[insert]', m) : () => undefined;
+      trace('beat1 start');
       // beat 1: align over the selected opening
       scene.tweens.add({
-        targets: c, x: target.x, y: target.y - 40, rotation: 0,
+        targets: c, x: target.x, y: target.y - standOff, rotation: 0,
         duration: INSERT_ALIGN_MS, ease: 'sine.easeout',
         onComplete: () => {
-          // beat 2: turn broad face -> edge-on
+          trace('beat1 done');
+          // beat 2: turn broad face -> edge-on (pose-correct scale targets)
+          const face = view.face;
+          const natW = face.frame?.width ?? face.width;
+          const natH = face.frame?.height ?? face.height;
+          const sx0 = loose.w / natW;
+          const sy0 = loose.h / natH;
+          if (turn) {
+            // pilot art: swap to the turn frame, keeping the visual center put
+            face.setTexture(turn.texture, turn.frame);
+            face.setOrigin(turn.origin[0], turn.origin[1]);
+            face.setDisplaySize(turn.w, turn.h);
+            face.setPosition(0, 0);
+            // ease the anchor point to the turn pose's home so nothing jumps
+            this.scene.tweens.add({
+              targets: face,
+              x: (0.5 - turn.origin[0]) * turn.w,
+              y: (0.5 - turn.origin[1]) * turn.h,
+              duration: INSERT_TURN_MS, ease: 'sine.easeinout',
+            });
+          } else {
+            scene.tweens.add({
+              targets: face,
+              scaleX: { from: sx0, to: spine.w / natW },
+              scaleY: { from: sy0, to: Math.min(spine.h, loose.h * 0.5) / natH },
+              duration: INSERT_TURN_MS, ease: 'sine.easein',
+            });
+          }
+          const spineChild = view.spine;
+          spineChild.setTexture(spine.texture, spine.frame)
+            .setOrigin(spine.origin[0], spine.origin[1])
+            .setDisplaySize(spine.w, spine.h)
+            .setPosition(0, 0) // identical convention to setSeatedPose: no seat jump
+            .setAlpha(0).setVisible(true);
           scene.tweens.add({
-            targets: view.face, alpha: { from: 1, to: 0 }, scaleX: { from: 1, to: 0.25 },
-            duration: INSERT_TURN_MS, ease: 'sine.easein',
-          });
-          view.spine.setAlpha(0).setVisible(true);
-          scene.tweens.add({
-            targets: view.spine, alpha: { from: 0, to: 1 }, duration: INSERT_TURN_MS, ease: 'sine.easeout',
-            onComplete: () => { view.face.setVisible(false).setAlpha(1).setScale(1); },
+            targets: spineChild, alpha: { from: 0, to: 1 }, duration: INSERT_TURN_MS, ease: 'sine.easeout',
+            onComplete: () => { face.setVisible(false).setAlpha(1); },
           });
           scene.time.delayedCall(INSERT_TURN_MS, () => {
+            trace('beat3 start');
             c.setDepth(slideDepth);
             this.drawMotionStrokes(target.x, target.y - 26);
             // beat 3: slide under the lip into the seat
             scene.tweens.add({
               targets: c, y: target.y, duration: INSERT_SLIDE_MS, ease: 'sine.easeinout',
               onComplete: () => {
+                trace('beat3 done');
                 audio.play('tuk'); // muted plastic tuck exactly when it seats
                 c.setDepth(seatDepth);
                 scene.tweens.add({
                   targets: c, scaleY: { from: 1, to: 0.92 }, duration: 55, yoyo: true, ease: 'sine.easein',
-                  onComplete: () => c.setScale(1, 1),
+                  onComplete: () => {
+                    c.setScale(1, 1);
+                    trace('seated');
+                    // §1: the seated pose is explicit; nothing persists from the tween
+                    setSeatedPose(scene, view, tape, u);
+                    // §4: milestones fire exactly when the tape finishes seating
+                    scene.onTapeSeatedFinished(rowId);
+                  },
                 });
               },
             });
@@ -665,11 +837,15 @@ export class DragController {
       for (const side of [-1, 1]) {
         const bx = x + side * 14;
         const cx = bx + side * 7;
-        // quadratic as a bezier with coincident control points (Graphics has
-        // no quadraticCurveTo in Phaser 3.90 — calling it killed the RAF loop)
+        // quadratic sampled manually (Graphics has no curve commands in 3.90)
         g.beginPath();
         g.moveTo(bx, y - 26);
-        g.bezierCurveTo(cx, y - 12, cx, y - 12, bx, y + 2);
+        for (let k = 1; k <= 6; k++) {
+          const t = k / 6;
+          const px = (1 - t) * (1 - t) * bx + 2 * (1 - t) * t * cx + t * t * bx;
+          const py = (1 - t) * (1 - t) * (y - 26) + 2 * (1 - t) * t * (y - 12) + t * t * (y + 2);
+          g.lineTo(px, py);
+        }
         g.strokePath();
       }
       scene_tween(this.scene, g, { alpha: 0 }, 260, () => g.clear());
@@ -683,9 +859,9 @@ export class DragController {
       const f = FAN[i] ?? [i * 60, 60];
       const spot = this.findTableSpot(anchor.x + f[0], anchor.y + f[1]);
       const c = view.container;
+      setLoosePose(this.scene, view, t);
       c.setPosition(spot.x, spot.y).setRotation(0).setDepth(spot.y);
       this.scene.tweens.add({ targets: c, scaleY: { from: 0.92, to: 1 }, duration: 90, ease: 'sine.easeout' });
-      if (view.overlay) view.overlay.setVisible(t.defect !== null && !t.repaired);
       t.x = Math.round(spot.x * 10) / 10;
       t.y = Math.round(spot.y * 10) / 10;
       t.rot = 0;
@@ -693,6 +869,7 @@ export class DragController {
       t.row = null; t.slot = null;
       this.scene.time.delayedCall(i * 60, () => audio.play('place'));
     });
+    this.scene.nudge?.markDirty();
     this.scene.emitCounters();
     this.scene.save();
   }
@@ -752,6 +929,7 @@ export class DragController {
       }
       this.returnHeldToOrigin(held);
     }
+    this.pendingTape = null;
     this.panDrag = null;
     this.touchPan = null;
   }

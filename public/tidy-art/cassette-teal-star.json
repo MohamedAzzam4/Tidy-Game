@@ -1,0 +1,73 @@
+{
+  "frames": {
+    "loose": {
+      "frame": {
+        "x": 160,
+        "y": 137,
+        "w": 676,
+        "h": 467
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 676,
+        "h": 467
+      },
+      "sourceSize": {
+        "w": 676,
+        "h": 467
+      }
+    },
+    "turn": {
+      "frame": {
+        "x": 1110,
+        "y": 82,
+        "w": 279,
+        "h": 567
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 279,
+        "h": 567
+      },
+      "sourceSize": {
+        "w": 279,
+        "h": 567
+      }
+    },
+    "spine": {
+      "frame": {
+        "x": 1802,
+        "y": 86,
+        "w": 134,
+        "h": 554
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 134,
+        "h": 554
+      },
+      "sourceSize": {
+        "w": 134,
+        "h": 554
+      }
+    }
+  },
+  "meta": {
+    "image": "cassette-teal-star.png",
+    "format": "RGBA8888",
+    "size": {
+      "w": 2172,
+      "h": 724
+    },
+    "scale": "1"
+  }
+}

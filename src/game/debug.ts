@@ -6,6 +6,9 @@ import Phaser from 'phaser';
 import type { GameScene } from './scenes/GameScene';
 import { validateWorld, boardCorrect, misfiledTapes } from './validation';
 import { audio } from './audio';
+import { unitPos, unitRect, UNIT_W } from './config';
+import { setLoosePose } from './poses';
+import { DEFAULT_SETTINGS } from './save';
 
 function audioRecentNames(): string[] {
   return audio.recent.map(r => r.name);
@@ -58,6 +61,20 @@ export interface TidyDebug {
   sceneInfo(): Record<string, { active: boolean; paused: boolean; sleeping: boolean }>;
   spritePos(id: number): { x: number; y: number } | null;
   storageOk(): boolean;
+  // ---- v3 probes ----
+  spriteSize(id: number): { w: number; h: number } | null;
+  milestones(): { rows: number; cabinets: number; achievements: number[]; last: { kind: string; row: number; unit: number; at: number } };
+  settings(): { sound: boolean; hoverFx: boolean; pilotArt: boolean; reducedMotion: boolean };
+  setSetting(key: 'sound' | 'hoverFx' | 'pilotArt' | 'reducedMotion', value: boolean): void;
+  nudge(): { enabled: boolean; lastNudgedId: number | null; activeCount: number };
+  panelOpen(): boolean;
+  togglePanel(): void;
+  returning(): boolean;
+  bankBounds(): { x0: number; x1: number; center: number };
+  unitRectInfo(u: number): { x: number; y: number; w: number; h: number };
+  textureOfTape(id: number): { face: string; spine: string } | null;
+  pilotArtState(): { art: boolean; atlasLoaded: boolean; bodyTexture: string };
+  recover(): void;
 }
 
 export function installDebug(game: Phaser.Game): void {
@@ -171,18 +188,7 @@ export function installDebug(game: Phaser.Game): void {
       if (!r) return false;
       const target = slot !== undefined && r.slots[slot] === null ? slot : r.slots.findIndex(x => x === null);
       if (target < 0) return false;
-      const view = s.tapeViews.get(id);
-      if (view) {
-        const p = { x: 0, y: 0 };
-        view.container.setPosition(p.x, p.y);
-      }
       s.seatTape(id, row, target, true);
-      const view2 = s.tapeViews.get(id);
-      if (view2) {
-        view2.face.setVisible(false);
-        if (view2.overlay) view2.overlay.setVisible(false);
-        view2.spine.setVisible(true);
-      }
       s.skills.onShelved(s.sortedCount);
       s.emitCounters();
       s.checkCompletion();
@@ -195,16 +201,9 @@ export function installDebug(game: Phaser.Game): void {
       if (!t || t.state !== 'shelved') return false;
       s.unseatTape(id);
       const view = s.tapeViews.get(id);
-      if (view) {
-        view.face.setVisible(true);
-        view.spine.setVisible(false);
-        view.container.setSize(92, 60);
-        view.container.setInteractive(
-          new Phaser.Geom.Rectangle(-46, -30, 92, 60),
-          Phaser.Geom.Rectangle.Contains,
-        );
-        const p = view.container;
-        t.x = p.x; t.y = p.y;
+      if (view && t) {
+        setLoosePose(s, view, t);
+        t.x = view.container.x; t.y = view.container.y;
       }
       s.emitCounters();
       return true;
@@ -214,15 +213,13 @@ export function installDebug(game: Phaser.Game): void {
       const s = getScene();
       if (!s) return;
       for (const id of s.trayIds()) {
-        s.unseatTape(id);
+        s.trayRemoveTape(id);
         const t = s.tapeData(id);
         const view = s.tapeViews.get(id);
         if (t && view) {
           t.state = 'loose';
           t.x = 320; t.y = 1680;
           view.container.setVisible(true).setPosition(320, 1680);
-          view.face.setVisible(true);
-          view.spine.setVisible(false);
         }
       }
       // rebuild tray array
@@ -235,6 +232,7 @@ export function installDebug(game: Phaser.Game): void {
       const s = getScene();
       if (!s) return;
       const t = s.world.tapes.find(x => x.id === tapeId);
+      console.log('[debug] openRepair', tapeId, 'defect:', t?.defect, 'repaired:', t?.repaired, 'state:', t?.state);
       if (t && t.defect && !t.repaired) s.skills.openRepair(tapeId);
     },
     repairAll: () => getScene()?.debugRepairAll() ?? -1,
@@ -271,6 +269,78 @@ export function installDebug(game: Phaser.Game): void {
     scanInfo: () => {
       const s = getScene();
       return { target: s?.skills.lastScanTarget ?? null, count: s?.skills.lastScanMatchCount ?? 0 };
+    },
+    // ---- v3 probes ----
+    spriteSize: (id) => {
+      const s = getScene();
+      const v = s?.tapeViews.get(id);
+      if (!v) return null;
+      return {
+        w: Math.round(v.face.displayWidth * 10) / 10,
+        h: Math.round(v.face.displayHeight * 10) / 10,
+      };
+    },
+    milestones: () => {
+      const s = getScene();
+      if (!s) return { rows: 0, cabinets: 0, achievements: [], last: { kind: 'none', row: -1, unit: -1, at: 0 } };
+      return {
+        rows: s.milestoneCounters.rows,
+        cabinets: s.milestoneCounters.cabinets,
+        achievements: [...s.achievements],
+        last: { ...s.lastMilestone },
+      };
+    },
+    settings: () => ({ ...DEFAULT_SETTINGS, ...(getScene()?.settings ?? {}) }),
+    setSetting: (key, value) => {
+      getScene()?.applySettings({ [key]: value } as Record<string, never>, false);
+    },
+    nudge: () => {
+      const s = getScene();
+      if (!s?.nudge) return { enabled: false, lastNudgedId: null, activeCount: 0 };
+      return { enabled: s.nudge.enabled, lastNudgedId: s.nudge.lastNudgedId, activeCount: s.nudge.activeCount };
+    },
+    panelOpen: () => !!game.registry.get('skillsPanelOpen'),
+    togglePanel: () => {
+      const open = !!game.registry.get('skillsPanelOpen');
+      game.events.emit('skills:panel:toggle', !open);
+    },
+    returning: () => !!getScene()?.returningTape,
+    bankBounds: () => {
+      const xs = [0, 1, 2, 3, 4, 5, 6, 7].map(u => unitPos(u));
+      const x0 = Math.min(...xs.map(p => p.x));
+      const x1 = Math.max(...xs.map(p => p.x)) + UNIT_W;
+      return { x0: Math.round(x0), x1: Math.round(x1), center: Math.round((x0 + x1) / 2) };
+    },
+    unitRectInfo: (u) => unitRect(u),
+    textureOfTape: (id) => {
+      const s = getScene();
+      const v = s?.tapeViews.get(id);
+      if (!v) return null;
+      return { face: v.face.texture.key, spine: v.spine.texture.key };
+    },
+    pilotArtState: () => {
+      const s = getScene();
+      return {
+        art: !!s && (s as unknown as { pilotViews: { body: { texture: { key: string } } } | null }).pilotViews?.body.texture.key === 'tt-cabinet',
+        atlasLoaded: !!s?.textures.exists('tt-cassette'),
+        bodyTexture: (s as unknown as { pilotViews: { body: { texture: { key: string } } } | null })?.pilotViews?.body.texture.key ?? '',
+      };
+    },
+    // failure recovery: one failing test must never poison the next one
+    recover: () => {
+      const s = getScene();
+      if (!s) return;
+      try { s.drag.cancel(); } catch { /* ignore */ }
+      try { s.skills.cancelMarquee(); } catch { /* ignore */ }
+      try { s.skills.clearSelection(); } catch { /* ignore */ }
+      try {
+        const repair = game.scene.getScene('Repair');
+        if (repair && repair.scene.isActive()) {
+          repair.scene.resume('Game');
+          repair.scene.stop('Repair');
+        }
+      } catch { /* ignore */ }
+      try { s.returningTape = false; } catch { /* ignore */ }
     },
   };
 

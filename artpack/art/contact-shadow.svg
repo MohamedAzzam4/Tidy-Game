@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="128" viewBox="0 0 256 128">
+  <defs>
+    <radialGradient id="falloff" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#261613" stop-opacity="0.64"/>
+      <stop offset="28%" stop-color="#261613" stop-opacity="0.52"/>
+      <stop offset="60%" stop-color="#261613" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#261613" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="256" height="128" fill="url(#falloff)"/>
+</svg>

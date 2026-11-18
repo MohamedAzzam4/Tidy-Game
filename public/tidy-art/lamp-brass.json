@@ -1,0 +1,33 @@
+{
+  "frames": {
+    "lamp": {
+      "frame": {
+        "x": 181,
+        "y": 69,
+        "w": 911,
+        "h": 1095
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 911,
+        "h": 1095
+      },
+      "sourceSize": {
+        "w": 911,
+        "h": 1095
+      }
+    }
+  },
+  "meta": {
+    "image": "lamp-brass.png",
+    "format": "RGBA8888",
+    "size": {
+      "w": 1278,
+      "h": 1230
+    },
+    "scale": "1"
+  }
+}

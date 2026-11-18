@@ -1,19 +1,23 @@
 import Phaser from 'phaser';
 import {
-  BENCH, COLORS, ROWS_PER_UNIT, SKILL_THRESHOLDS, SPINE_H, SPINE_W, SYMBOLS, UNITS,
+  ART_PILOT, BENCH, COLORS, RETURN_FROM, RETURN_SPOT, ROWS_PER_UNIT,
+  ROW_PULSE_MS, SKILL_THRESHOLDS, SYMBOLS, UNITS,
   WORLD_H, WORLD_W, ZOOM_MAX, ZOOM_MIN, benchRect, rowRect, slotPos, trayScreenRect,
   unitOfRow, unitPos, unitRect, groupOfRow, rowsOfGroup, ROW_CH_TOP, ROW_PITCH, ROW_CH_H,
-  UNIT_W, UNIT_H,
+  UNIT_W, UNIT_H, isPilotUnit,
 } from '../config';
 import { defectBlocksFiling } from '../types';
-import type { Row, Tape, WorldData, SkillId } from '../types';
+import type { Row, Tape, WorldData, SkillId, SaveSettings } from '../types';
 import { generateWorld } from '../worldgen';
 import { boardCorrect, validateWorld } from '../validation';
 import { audio } from '../audio';
 import { DragController } from '../controllers/DragController';
 import { SkillsController, type PowerId } from '../controllers/SkillsController';
 import { randomSeed } from '../rng';
-import { applySave, loadRun, saveRun, serializeRun, storageAvailable } from '../save';
+import { applySave, loadRun, resolveSaveOverlaps, saveRun, serializeRun, storageAvailable } from '../save';
+import { setLoosePose, setSeatedPose } from '../poses';
+import { artState } from '../artState';
+import { HoverNudge } from '../nudge';
 
 export interface TapeView {
   id: number;
@@ -26,7 +30,7 @@ export interface TapeView {
 export interface UnitView {
   unit: number;
   body: Phaser.GameObjects.Image;
-  lips: Phaser.GameObjects.Image;
+  lips: Phaser.GameObjects.Image[];      // per-row foreground lips (pilot: 4)
   chips: Phaser.GameObjects.Image[];
   counts: Phaser.GameObjects.Text[];
   verify: Phaser.GameObjects.Text;
@@ -41,6 +45,7 @@ export class GameScene extends Phaser.Scene {
   trayTapes: (number | null)[] = [null, null, null, null, null];
   drag!: DragController;
   skills!: SkillsController;
+  nudge!: HoverNudge;
   sortedCount = 0;
   seed = 0;
   playSeconds = 0;
@@ -48,6 +53,19 @@ export class GameScene extends Phaser.Scene {
   /** carried-over skill unlocks when migrating from a v1 save */
   carriedSkills: Record<SkillId, boolean> | null = null;
   pendingSave: ReturnType<typeof loadRun> = null;
+  // --- v3 state ---
+  settings: SaveSettings = { sound: true, hoverFx: true, pilotArt: true, reducedMotion: false };
+  achievements = new Set<number>();       // cabinet completions (permanent)
+  rowComplete: boolean[] = [];             // edge-triggered row milestone state
+  milestoneCounters = { rows: 0, cabinets: 0 };
+  lastMilestone = { kind: 'none' as 'none' | 'row' | 'cabinet', row: -1, unit: -1, at: 0 };
+  returningTape = false;                   // repair return in flight (no autosave)
+  pilotViews: {
+    body: Phaser.GameObjects.Image;
+    lips: Phaser.GameObjects.Image[];      // atlas foreground lips (art mode)
+    plainLips: Phaser.GameObjects.Graphics[]; // plain wood rails (before mode)
+    atlasLamp: Phaser.GameObjects.Image | null;
+  } | null = null;
   private override: { seed?: number; fresh?: boolean; carry?: boolean } | null = null;
   private saveTimer = 0;
   keys!: Record<string, Phaser.Input.Keyboard.Key>;
@@ -55,6 +73,7 @@ export class GameScene extends Phaser.Scene {
   private completionShownFlag = false;
   private notDoneShown = false;
   private uiBlocked = false;
+  private rowPulseGfx: Phaser.GameObjects.Graphics | null = null;
 
   constructor() {
     super({ key: 'Game' });
@@ -74,6 +93,13 @@ export class GameScene extends Phaser.Scene {
     this.carriedSkills = null;
     this.pendingSave = null;
     this.uiBlocked = false;
+    this.achievements = new Set();
+    this.rowComplete = [];
+    this.milestoneCounters = { rows: 0, cabinets: 0 };
+    this.lastMilestone = { kind: 'none', row: -1, unit: -1, at: 0 };
+    this.returningTape = false;
+    this.pilotViews = null;
+    this.rowPulseGfx = null;
   }
 
   create(): void {
@@ -83,12 +109,18 @@ export class GameScene extends Phaser.Scene {
     if (!validation.ok) {
       console.warn('world validation issues:', validation.issues.slice(0, 4));
     }
-    if (this.pendingSave) applySave(this.world, this.pendingSave);
+    if (this.pendingSave) {
+      applySave(this.world, this.pendingSave);
+      // v3 layout fixup: moved racks (centered north bank / walnut pilot) may
+      // now overlap saved loose positions — push them out, never drop them
+      resolveSaveOverlaps(this.world);
+    }
 
     this.buildWorldVisuals();
     this.drag = new DragController(this);
     this.skills = new SkillsController(this);
     this.drag.skills = this.skills;
+    this.nudge = new HoverNudge(this);
     if (this.pendingSave) {
       this.skills.unlocked = { ...this.pendingSave.skills } as Record<SkillId, boolean>;
       for (const [k, v] of Object.entries(this.pendingSave.powers)) {
@@ -106,11 +138,16 @@ export class GameScene extends Phaser.Scene {
         while (this.trayTapes.length < 5) this.trayTapes.push(null);
         for (const id of this.trayTapes) if (id !== null) this.stowInTrayView(id);
       }
+      for (const u of this.pendingSave.achievements ?? []) this.achievements.add(u);
+      this.milestoneCounters = { ...this.pendingSave.milestones ?? { rows: 0, cabinets: 0 } };
+      if (this.pendingSave.settings) this.applySettings(this.pendingSave.settings, false);
       this.pendingSave = null;
     } else if (this.carriedSkills) {
       this.skills.unlocked = { ...this.carriedSkills };
       this.skills.syncPowerUnlocks();
     }
+    // initial (silent) row-completion state — no milestone sounds on load
+    for (const r of this.world.rows) this.rowComplete[r.id] = this.rowIsCompleteCorrect(r.id);
 
     this.setupCamera();
     this.setupInput();
@@ -118,6 +155,7 @@ export class GameScene extends Phaser.Scene {
 
     this.game.events.emit('tray:changed');
     this.game.events.emit('game:ready');
+    this.game.events.emit('settings:changed', { ...this.settings });
     this.emitCounters();
   }
 
@@ -125,6 +163,9 @@ export class GameScene extends Phaser.Scene {
   private buildWorldVisuals(): void {
     const table = this.add.tileSprite(0, 0, WORLD_W, WORLD_H, 'wood');
     table.setOrigin(0, 0).setDepth(0);
+
+    // walnut inlay wing (pilot corner surface) + seams, under everything else
+    this.buildPilotSurface();
 
     // warm table edge with a front-face band (south) + darker side bands
     const edges = this.add.graphics().setDepth(1);
@@ -146,6 +187,16 @@ export class GameScene extends Phaser.Scene {
       color: '#5b3b26', fontStyle: 'bold',
     }).setOrigin(0.5).setDepth(2).setAlpha(0.85);
 
+    // marked return spot for repaired tapes (v3 §7) — right of the bench
+    const marker = this.add.graphics().setDepth(2).setAlpha(0.55);
+    marker.lineStyle(2, 0x8a5a3b, 0.9);
+    marker.strokeCircle(RETURN_SPOT.x, RETURN_SPOT.y, 34);
+    marker.lineStyle(1.2, 0xd9b98a, 0.7);
+    marker.strokeCircle(RETURN_SPOT.x, RETURN_SPOT.y, 26);
+    this.add.text(RETURN_SPOT.x, RETURN_SPOT.y - 46, '↩ repaired', {
+      fontFamily: 'Georgia, serif', fontSize: '13px', color: '#7d5333', fontStyle: 'bold',
+    }).setOrigin(0.5).setDepth(2).setAlpha(0.75);
+
     // props (decorative dressing on the busy bench)
     this.add.image(214, 96, 'prop-lamp').setDepth(3).setScale(0.8);
     this.add.image(2688, 250, 'prop-radio').setDepth(3).setScale(0.9);
@@ -154,31 +205,8 @@ export class GameScene extends Phaser.Scene {
 
     // rack units (layered: body < chips/counts < seated spines < lips)
     for (let u = 0; u < UNITS; u++) {
-      const p = unitPos(u);
-      const body = this.add.image(p.x + UNIT_W / 2, p.y + UNIT_H / 2, 'unit-body');
-      body.setDisplaySize(UNIT_W, UNIT_H).setDepth(p.y);
-      const lips = this.add.image(p.x + UNIT_W / 2, p.y + UNIT_H / 2, 'unit-lips');
-      lips.setDisplaySize(UNIT_W, UNIT_H).setDepth(p.y + 2);
-      const chips: Phaser.GameObjects.Image[] = [];
-      const counts: Phaser.GameObjects.Text[] = [];
-      for (let lr = 0; lr < ROWS_PER_UNIT; lr++) {
-        const row = u * ROWS_PER_UNIT + lr;
-        const group = groupOfRow(row);
-        const cy = p.y + ROW_CH_TOP + lr * ROW_PITCH + ROW_CH_H / 2;
-        const chip = this.add.image(p.x + 24, cy, `chip-${group}`);
-        chip.setDisplaySize(28, 28).setDepth(p.y + 0.4);
-        chips.push(chip);
-        const count = this.add.text(p.x + UNIT_W - 10, cy - 7, '0/8', {
-          fontFamily: 'Georgia, serif', fontSize: '12px', color: '#f6efdd',
-        }).setOrigin(1, 0).setDepth(p.y + 0.5);
-        counts.push(count);
-      }
-      const verify = this.add.text(p.x + UNIT_W - 34, p.y + 16, '✓?', {
-        fontFamily: 'Georgia, serif', fontSize: '14px', fontStyle: 'bold', color: '#ffe9a8',
-        backgroundColor: '#5a3520', padding: { x: 6, y: 2 },
-      }).setOrigin(0.5).setDepth(p.y + 0.5).setInteractive({ useHandCursor: true });
-      verify.on('pointerdown', () => { audio.unlock(); this.verifyUnit(u); });
-      this.unitViews.set(u, { unit: u, body, lips, chips, counts, verify });
+      if (isPilotUnit(u)) this.buildPilotUnit(u);
+      else this.buildFallbackUnit(u);
     }
 
     // tapes
@@ -193,24 +221,226 @@ export class GameScene extends Phaser.Scene {
       }
     }
     this.sortedCount = this.world.tapes.filter(t => t.state === 'shelved').length;
+
+    // scene lighting (v3 §3): world-space layers above the world, below fx/HUD
+    this.buildLighting();
+  }
+
+  private buildFallbackUnit(u: number): void {
+    const p = unitPos(u);
+    const body = this.add.image(p.x + UNIT_W / 2, p.y + UNIT_H / 2, 'unit-body');
+    body.setDisplaySize(UNIT_W, UNIT_H).setDepth(p.y);
+    const lips = this.add.image(p.x + UNIT_W / 2, p.y + UNIT_H / 2, 'unit-lips');
+    lips.setDisplaySize(UNIT_W, UNIT_H).setDepth(p.y + 2);
+    const chips: Phaser.GameObjects.Image[] = [];
+    const counts: Phaser.GameObjects.Text[] = [];
+    this.attachRowLabels(u, (lr) => p.x + 24, (lr) => p.y + ROW_CH_TOP + lr * ROW_PITCH + ROW_CH_H / 2, () => p.x + UNIT_W - 10, chips, counts);
+    const verify = this.add.text(p.x + UNIT_W - 34, p.y + 16, '✓?', {
+      fontFamily: 'Georgia, serif', fontSize: '14px', fontStyle: 'bold', color: '#ffe9a8',
+      backgroundColor: '#5a3520', padding: { x: 6, y: 2 },
+    }).setOrigin(0.5).setDepth(p.y + 0.5).setInteractive({ useHandCursor: true });
+    verify.on('pointerdown', () => { audio.unlock(); this.verifyUnit(u); });
+    this.unitViews.set(u, { unit: u, body, lips: [lips], chips, counts, verify });
+  }
+
+  /** shared row-label chips + occupancy counters for a unit */
+  private attachRowLabels(
+    u: number,
+    chipX: (lr: number) => number,
+    chipY: (lr: number) => number,
+    countX: (lr: number) => number,
+    chips: Phaser.GameObjects.Image[],
+    counts: Phaser.GameObjects.Text[],
+  ): void {
+    for (let lr = 0; lr < ROWS_PER_UNIT; lr++) {
+      const row = u * ROWS_PER_UNIT + lr;
+      const group = groupOfRow(row);
+      const cy = chipY(lr);
+      const chip = this.add.image(chipX(lr), cy, `chip-${group}`);
+      chip.setDisplaySize(28, 28).setDepth(unitPos(u).y + 0.4);
+      chips.push(chip);
+      const count = this.add.text(countX(lr), cy - 7, '0/8', {
+        fontFamily: 'Georgia, serif', fontSize: '12px', color: '#f6efdd',
+      }).setOrigin(1, 0).setDepth(unitPos(u).y + 0.5);
+      counts.push(count);
+    }
+  }
+
+  /** the walnut art-pilot cabinet (unit 12): body behind tapes, 4 lips in front */
+  private buildPilotUnit(u: number): void {
+    const rect = unitRect(u);
+    const k = ART_PILOT.cabScale;
+    const depth = rect.y;
+    const useArt = artState.pilotArt && this.textures.exists('tt-cabinet');
+
+    // big soft contact shadow under the cabinet
+    const shadow = this.add.image(rect.x + rect.w / 2 + 14, rect.y + rect.h / 2 + 16, 'contact-shadow');
+    shadow.setDisplaySize(rect.w * 1.16, rect.h * 1.1).setDepth(depth - 0.6)
+      .setAlpha(ART_PILOT.light.contactShadowAlpha);
+
+    const body = this.add.image(rect.x, rect.y, useArt ? 'tt-cabinet' : 'walnut-plain', useArt ? 'body' : undefined);
+    body.setOrigin(0, 0).setDisplaySize(rect.w, rect.h).setDepth(depth);
+
+    // four foreground lips at the supplied art offsets, same scale as the body;
+    // in "before" mode simple wood rails take over so occlusion still works
+    const lips: Phaser.GameObjects.Image[] = [];
+    const plainLips: Phaser.GameObjects.Graphics[] = [];
+    if (useArt) {
+      for (let lr = 0; lr < ROWS_PER_UNIT; lr++) {
+        const [lx, ly] = ART_PILOT.lips[lr];
+        const lip = this.add.image(rect.x + lx * k, rect.y + ly * k, 'tt-cabinet', `lip-${lr + 1}`);
+        lip.setOrigin(0, 0).setDisplaySize(678 * k, 48 * k).setDepth(depth + 2 + lr * 0.03);
+        lips.push(lip);
+      }
+    } else {
+      for (let lr = 0; lr < ROWS_PER_UNIT; lr++) {
+        const [lx, ly] = ART_PILOT.lips[lr];
+        const g = this.add.graphics().setDepth(depth + 2 + lr * 0.03);
+        g.fillStyle(0x7a4f30, 1);
+        g.fillRoundedRect(rect.x + lx * k, rect.y + ly * k, 678 * k, 48 * k, 4);
+        g.fillStyle(0xb9855a, 1);
+        g.fillRect(rect.x + lx * k, rect.y + ly * k + 2, 678 * k, 3);
+        plainLips.push(g);
+      }
+    }
+
+    // row labels sit beside the cabinet's left edge (on the inlay), counts at right
+    const chips: Phaser.GameObjects.Image[] = [];
+    const counts: Phaser.GameObjects.Text[] = [];
+    this.attachRowLabels(
+      u,
+      () => rect.x - 36,
+      (lr) => rect.y + ART_PILOT.seats[lr] * k - 20,
+      () => rect.x + rect.w - 14,
+      chips, counts,
+    );
+
+    const verify = this.add.text(rect.x + rect.w - 26, rect.y + 18, '✓?', {
+      fontFamily: 'Georgia, serif', fontSize: '15px', fontStyle: 'bold', color: '#ffe9a8',
+      backgroundColor: '#5a3520', padding: { x: 6, y: 2 },
+    }).setOrigin(0.5).setDepth(depth + 0.5).setInteractive({ useHandCursor: true });
+    verify.on('pointerdown', () => { audio.unlock(); this.verifyUnit(u); });
+
+    this.unitViews.set(u, { unit: u, body, lips, chips, counts, verify });
+    this.pilotViews = { body, lips, plainLips, atlasLamp: null };
+  }
+
+  /** walnut-tile inlay wing + painted seams + rim trim on the exposed edges */
+  private buildPilotSurface(): void {
+    const { x0, y0, x1, y1 } = ART_PILOT.inlay;
+    if (this.textures.exists('walnut-tile')) {
+      const inlay = this.add.tileSprite(x0, y0, x1 - x0, y1 - y0, 'walnut-tile');
+      inlay.setOrigin(0, 0).setDepth(0.5);
+      // painted seams (dark joint + warm highlight) so the patch reads intentional
+      const seam = this.add.graphics().setDepth(0.7);
+      seam.lineStyle(5, 0x3a2314, 0.65);
+      seam.strokeRect(x0, y0, x1 - x0, y1 - y0);
+      seam.lineStyle(1.6, 0xd9b98a, 0.25);
+      seam.strokeRect(x0 + 4, y0 + 4, x1 - x0 - 8, y1 - y0 - 8);
+      // wooden rim along the exposed table edges of this wing (top + right)
+      if (this.textures.exists('tt-rim')) {
+        const rimW = x1 - x0;
+        const rimTop = this.add.image(x0 + rimW / 2, 8, 'tt-rim', 'rim');
+        rimTop.setDisplaySize(rimW - 10, 40).setDepth(0.8);
+        const rimRight = this.add.image(WORLD_W - 8, y0 + (y1 - y0) / 2, 'tt-rim', 'rim');
+        rimRight.setDisplaySize(y1 - y0 - 10, 40).setRotation(Math.PI / 2).setDepth(0.8);
+      }
+    }
+  }
+
+  /** world-space lighting: ambient fill, warm falloff from the lamp, lamp pool/halo */
+  private buildLighting(): void {
+    const L = ART_PILOT.light;
+    const lamp = ART_PILOT.lamp;
+    const bulb = {
+      x: lamp.x + 0.66 * lamp.w,
+      y: lamp.y + 0.46 * lamp.h,
+    };
+    const lightDepth = 139000; // above world objects + held tapes, below fx/HUD
+
+    // brass lamp prop (art toggle aware): atlas lamp in pilot mode, fallback prop otherwise
+    const useArt = artState.pilotArt && this.textures.exists('tt-lamp');
+    const lampImg = this.add.image(lamp.x, lamp.y, useArt ? 'tt-lamp' : 'prop-lamp', useArt ? 'lamp' : undefined);
+    if (useArt) {
+      lampImg.setOrigin(0, 0).setDisplaySize(lamp.w, lamp.h);
+    } else {
+      lampImg.setOrigin(0.5, 0.8).setPosition(lamp.x + lamp.w / 2, lamp.y + lamp.h).setScale(1.1);
+    }
+    lampImg.setDepth(lamp.y + lamp.h - 6);
+    if (this.pilotViews) this.pilotViews.atlasLamp = useArt ? lampImg : null;
+    const lampShadow = this.add.image(lamp.x + lamp.w * 0.35 + 10, lamp.y + lamp.h - 8, 'contact-shadow');
+    lampShadow.setDisplaySize(120, 52).setAlpha(0.4).setDepth(lamp.y + lamp.h - 6.2);
+
+    // quiet warm ambient fill over the whole tabletop (normal blend)
+    this.ensureTexture('light-ambient', (ctx) => {
+      ctx.fillStyle = '#32221e';
+      ctx.fillRect(0, 0, 8, 8);
+    });
+    const ambient = this.add.image(WORLD_W / 2, WORLD_H / 2, 'light-ambient');
+    ambient.setDisplaySize(WORLD_W, WORLD_H).setDepth(lightDepth)
+      .setAlpha(L.ambientAlpha).setBlendMode(Phaser.BlendModes.NORMAL);
+
+    // restrained world-space warm falloff around the lamp (restrained additive)
+    this.ensureTexture('light-warm', (ctx, S) => {
+      const g = ctx.createRadialGradient(S / 2, S / 2, S * 0.02, S / 2, S / 2, S / 2);
+      g.addColorStop(0, 'rgba(255,214,150,0.55)');
+      g.addColorStop(0.45, 'rgba(255,196,120,0.18)');
+      g.addColorStop(1, 'rgba(255,180,100,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, S, S);
+    });
+    const falloff = this.add.image(bulb.x, bulb.y, 'light-warm');
+    falloff.setDisplaySize(2100, 1700).setDepth(lightDepth + 1)
+      .setAlpha(L.falloffAlpha).setBlendMode(Phaser.BlendModes.ADD);
+
+    // distance falloff: gentle darkening away from the lamp (world-anchored)
+    this.ensureTexture('light-far', (ctx, S) => {
+      const g = ctx.createRadialGradient(S / 2, S / 2, S * 0.28, S / 2, S / 2, S / 2);
+      g.addColorStop(0, 'rgba(20,10,6,0)');
+      g.addColorStop(0.7, 'rgba(20,10,6,0.35)');
+      g.addColorStop(1, 'rgba(20,10,6,0.8)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, S, S);
+    });
+    const far = this.add.image(bulb.x, bulb.y, 'light-far');
+    far.setDisplaySize(3600, 2800).setDepth(lightDepth + 1)
+      .setAlpha(L.cornerVignetteAlpha).setBlendMode(Phaser.BlendModes.NORMAL);
+
+    // amber pool just down-and-right of the shade + small bulb halo
+    const poolTex = this.textures.exists('lamp-pool') ? 'lamp-pool' : 'light-warm';
+    const pool = this.add.image(bulb.x + 70, bulb.y + 56, poolTex);
+    pool.setDisplaySize(640, 480).setDepth(lightDepth + 2)
+      .setAlpha(L.lampPoolAlpha).setBlendMode(Phaser.BlendModes.ADD);
+    const haloTex = this.textures.exists('bulb-halo') ? 'bulb-halo' : 'light-warm';
+    const halo = this.add.image(bulb.x, bulb.y, haloTex);
+    halo.setDisplaySize(120, 120).setDepth(lightDepth + 3)
+      .setAlpha(L.bulbHaloAlpha).setBlendMode(Phaser.BlendModes.ADD);
+  }
+
+  /** tiny canvas-texture helper (fallbacks when an SVG asset failed to load) */
+  private ensureTexture(key: string, draw: (ctx: CanvasRenderingContext2D, S: number) => void): void {
+    if (this.textures.exists(key)) return;
+    const S = 256;
+    const tex = this.textures.createCanvas(key, S, S);
+    if (!tex) return;
+    const ctx = (tex as Phaser.Textures.CanvasTexture).getContext();
+    ctx.clearRect(0, 0, S, S);
+    draw(ctx, S);
+    (tex as Phaser.Textures.CanvasTexture).refresh();
   }
 
   spawnLooseTape(tape: Tape): TapeView {
     const face = this.add.image(0, 0, `tape-face-${tape.combo}`);
-    face.setDisplaySize(104, 72);
     const spine = this.add.image(0, 0, `spine-${tape.combo}`);
-    spine.setDisplaySize(SPINE_W, SPINE_H).setVisible(false);
-    const container = this.add.container(tape.x, tape.y, [face, spine]);
+    const overlay = tape.defect && !tape.repaired
+      ? this.add.image(0, 0, `defect-${tape.defect}`)
+      : null;
+    const children: Phaser.GameObjects.GameObject[] = [face, spine];
+    if (overlay) children.push(overlay);
+    const container = this.add.container(tape.x, tape.y, children);
+    const view: TapeView = { id: tape.id, container, face, spine, overlay: overlay ?? null };
+    setLoosePose(this, view, tape);
     container.setRotation(tape.rot);
-    const view: TapeView = { id: tape.id, container, face, spine, overlay: null };
-    if (tape.defect && !tape.repaired) {
-      const ov = this.add.image(0, 0, `defect-${tape.defect}`);
-      ov.setDisplaySize(92, 60);
-      container.add(ov);
-      view.overlay = ov;
-    }
-    container.setSize(92, 60);
-    container.setInteractive(new Phaser.Geom.Rectangle(-46, -30, 92, 60), Phaser.Geom.Rectangle.Contains);
     container.setData('tapeId', tape.id);
     container.setDepth(tape.y);
     this.tapeViews.set(tape.id, view);
@@ -218,19 +448,16 @@ export class GameScene extends Phaser.Scene {
   }
 
   spawnShelvedTape(tape: Tape): TapeView {
-    const spine = this.add.image(0, 0, `spine-${tape.combo}`);
-    spine.setDisplaySize(SPINE_W, SPINE_H);
     const face = this.add.image(0, 0, `tape-face-${tape.combo}`);
-    face.setDisplaySize(104, 72).setVisible(false);
+    const spine = this.add.image(0, 0, `spine-${tape.combo}`);
     const container = this.add.container(0, 0, [face, spine]);
-    container.setSize(SPINE_W, SPINE_H); // thin hit strip on the seated spine
-    container.setInteractive(new Phaser.Geom.Rectangle(-SPINE_W / 2, -SPINE_H / 2, SPINE_W, SPINE_H), Phaser.Geom.Rectangle.Contains);
-    container.setData('tapeId', tape.id);
-    const p = slotPos(tape.row as number, tape.slot as number);
+    const view: TapeView = { id: tape.id, container, face, spine, overlay: null };
     const u = unitOfRow(tape.row as number);
+    setSeatedPose(this, view, tape, u);
+    const p = slotPos(tape.row as number, tape.slot as number);
     const lr = (tape.row as number) % ROWS_PER_UNIT;
     container.setPosition(p.x, p.y).setDepth(unitPos(u).y + 1 + lr * 0.02);
-    const view: TapeView = { id: tape.id, container, face, spine, overlay: null };
+    container.setData('tapeId', tape.id);
     this.tapeViews.set(tape.id, view);
     const row = this.world.rows[tape.row as number];
     row.slots[tape.slot as number] = tape.id;
@@ -250,9 +477,10 @@ export class GameScene extends Phaser.Scene {
 
   restoreFromTrayView(id: number): void {
     const view = this.tapeViews.get(id);
-    if (view) {
+    const t = this.tapeData(id);
+    if (view && t) {
+      setLoosePose(this, view, t);
       view.container.setVisible(true);
-      view.container.setInteractive(new Phaser.Geom.Rectangle(-46, -30, 92, 60), Phaser.Geom.Rectangle.Contains);
     }
     this.game.events.emit('tray:changed');
   }
@@ -271,6 +499,8 @@ export class GameScene extends Phaser.Scene {
     t.state = 'tray';
     t.row = null; t.slot = null;
     this.stowInTrayView(id);
+    this.nudge?.markDirty();
+    this.game.events.emit('tray:flash', { slot });
     return slot;
   }
 
@@ -279,6 +509,7 @@ export class GameScene extends Phaser.Scene {
     if (id === null) return null;
     this.trayTapes[slot] = null;
     this.restoreFromTrayView(id);
+    this.nudge?.markDirty();
     return id;
   }
 
@@ -298,11 +529,11 @@ export class GameScene extends Phaser.Scene {
     const cam = this.cameras.main;
     cam.setBounds(0, 0, WORLD_W, WORLD_H);
     cam.setBackgroundColor('#2a1a10');
-    // first impression: the back bank of organizers + the busy center together
+    // first impression: the centered north bank + the busy middle together
     cam.setZoom(0.72);
-    cam.centerOn(1420, 770);
+    cam.centerOn(1400, 770);
     const kb = this.input.keyboard as Phaser.Input.Keyboard.KeyboardPlugin;
-    this.keys = kb.addKeys('W,A,S,D,UP,LEFT,DOWN,RIGHT,PLUS,MINUS,Q,E,SPACE,ESC,F') as Record<string, Phaser.Input.Keyboard.Key>;
+    this.keys = kb.addKeys('W,A,S,D,UP,LEFT,DOWN,RIGHT,PLUS,MINUS,Q,E,SPACE,ESC,F,R') as Record<string, Phaser.Input.Keyboard.Key>;
   }
 
   panCamera(dx: number, dy: number): void {
@@ -344,10 +575,10 @@ export class GameScene extends Phaser.Scene {
 
   // ------------------------------------------------------------------- input
   private setupInput(): void {
-    this.input.mouse?.disableContextMenu();
+    this.input.mouse?.disableContextMenu(); // canvas only — the page keeps its menu
     this.input.addPointer(3); // multi-touch
 
-    // wheel = zoom, centered on the cursor (v2; pan stays on keys/drag/touch)
+    // wheel = zoom, centered on the cursor (pan stays on keys/drag/touch)
     this.input.on('wheel', (_p: Phaser.Input.Pointer, _o: unknown, _dx: number, dy: number) => {
       audio.unlock();
       const d = Phaser.Math.Clamp(dy, -180, 180);
@@ -361,18 +592,34 @@ export class GameScene extends Phaser.Scene {
     });
     this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
       this.drag.onPointerMove(pointer);
+      this.nudge.onPointerMove(pointer);
     });
     this.input.on('pointerup', (pointer: Phaser.Input.Pointer) => {
       this.drag.onPointerUp(pointer);
     });
 
     const kb2 = this.input.keyboard as Phaser.Input.Keyboard.KeyboardPlugin;
-    kb2.on('keydown-ESC', () => this.drag.cancel());
-    kb2.on('keydown-D', () => this.skills.toggleScanner());
-    kb2.on('keydown-M', () => this.skills.tryActivatePower('misplaced'));
-    kb2.on('keydown-S', () => this.skills.tryActivatePower('matchScan'));
-    kb2.on('keydown-G', () => this.skills.tryActivatePower('matchGather'));
-    kb2.on('keydown-F', () => this.fitToTable());
+    const typingGuard = (ev: KeyboardEvent): boolean =>
+      ev.repeat === true
+      || (document.activeElement instanceof HTMLElement
+        && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName));
+    kb2.on('keydown-ESC', () => {
+      // close the skills panel first if it is open (panel is in the UI scene)
+      if (this.game.registry.get('skillsPanelOpen')) {
+        this.game.events.emit('skills:panel:toggle', false);
+        return;
+      }
+      this.drag.cancel();
+    });
+    kb2.on('keydown-D', (ev: KeyboardEvent) => { if (!typingGuard(ev)) this.skills.toggleScanner(); });
+    kb2.on('keydown-M', (ev: KeyboardEvent) => { if (!typingGuard(ev)) this.skills.tryActivatePower('misplaced'); });
+    kb2.on('keydown-S', (ev: KeyboardEvent) => { if (!typingGuard(ev)) this.skills.tryActivatePower('matchScan'); });
+    kb2.on('keydown-G', (ev: KeyboardEvent) => { if (!typingGuard(ev)) this.skills.tryActivatePower('matchGather'); });
+    kb2.on('keydown-F', (ev: KeyboardEvent) => { if (!typingGuard(ev)) this.fitToTable(); });
+    kb2.on('keydown-R', (ev: KeyboardEvent) => {
+      if (typingGuard(ev) || this.uiBlocked) return;
+      this.tryOpenRepairAtPointer();
+    });
     kb2.on('keydown', () => audio.unlock());
 
     this.game.events.on('repair:closed', this.onRepairClosed, this);
@@ -383,21 +630,176 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  /** R key: open the repair bench for the damaged tape under the cursor */
+  tryOpenRepairAtPointer(): void {
+    if (this.drag.held || this.drag.trayBatchDrag) return;
+    const p = this.input.activePointer;
+    const wp = this.cameras.main.getWorldPoint(p.x, p.y);
+    const view = this.drag.looseTapeAtWorldPublic(wp.x, wp.y);
+    const t = view ? this.tapeData(view.id) : undefined;
+    if (t && t.defect && !t.repaired) {
+      this.skills.openRepair(t.id);
+    } else {
+      this.game.events.emit('hint', 'R repairs a damaged tape under the cursor (or drag one onto the bench)');
+    }
+  }
+
   /** screen-space UI regions the game scene must not treat as table input */
   pointerOverUI(pointer: Phaser.Input.Pointer): boolean {
     const W = this.scale.width;
     const H = this.scale.height;
-    if (pointer.y < 58) return true; // top bar
+    if (pointer.y < 58) return true; // top bar (incl. the Skills icon)
     const tray = trayScreenRect(W, H);
     if (pointer.x >= tray.x - 6 && pointer.x <= tray.x + tray.w + 6
       && pointer.y >= tray.y - 6 && pointer.y <= tray.y + tray.h + 6) return true;
-    if (pointer.y > H - 100 && pointer.x < 880) return true; // skill chips bar
+    if (pointer.y > H - 52 && pointer.x < 340) return true; // dev cluster (pilot toggles)
+    // open panels (skills panel / help / confirm) cover the middle of the screen
+    const rects = this.game.registry.get('uiPanelRects') as { x: number; y: number; w: number; h: number }[] | undefined;
+    if (rects) {
+      for (const r of rects) {
+        if (pointer.x >= r.x && pointer.x <= r.x + r.w && pointer.y >= r.y && pointer.y <= r.y + r.h) return true;
+      }
+    }
     return false;
   }
 
   private onRepairClosed(data: { id: number; success: boolean }): void {
-    this.skills.onRepairClosed(data.id, data.success);
+    this.skills.onRepairClosed(data.id, false); // skills bookkeeping only (no teleport)
+    if (data.success) this.animateRepairReturn(data.id);
+    else this.emitCounters();
+  }
+
+  // --------------------------------------------- repair return flight (v3 §7)
+  /**
+   * The repaired cassette shows briefly in the overlay (RepairScene handles
+   * that beat), then THE SAME tape flies from the bench to the marked return
+   * spot: ~0.7 s eased travel + settle, camera pans if the destination is off
+   * screen, lands at the canonical loose size, immediately draggable, saved
+   * only after landing (never mid-flight, never duplicated).
+   */
+  animateRepairReturn(id: number): void {
+    const t = this.tapeData(id);
+    const view = this.tapeViews.get(id);
+    if (!t || !view) { this.emitCounters(); return; }
+    t.repaired = true;
+    if (view.overlay) view.overlay.setVisible(false);
+    t.state = 'loose';
+    t.row = null; t.slot = null;
+    t.x = RETURN_FROM.x; t.y = RETURN_FROM.y; t.rot = 0;
+    this.returningTape = true;
+
+    // normal-sized loose pose, held above the table for the flight
+    setLoosePose(this, view, t);
+    const c = view.container;
+    c.setVisible(true).setPosition(RETURN_FROM.x, RETURN_FROM.y).setRotation(-0.18)
+      .setDepth(100050).disableInteractive();
+
+    // the camera shows the destination (pan only if it is off screen)
+    const cam = this.cameras.main;
+    const view2 = cam.worldView;
+    const both = { x: (RETURN_FROM.x + RETURN_SPOT.x) / 2, y: (RETURN_FROM.y + RETURN_SPOT.y) / 2 };
+    const destVisible = RETURN_SPOT.x > view2.x - 60 && RETURN_SPOT.x < view2.right + 60
+      && RETURN_SPOT.y > view2.y - 60 && RETURN_SPOT.y < view2.bottom + 60;
+    if (!destVisible) cam.pan(both.x, both.y, 520, 'Sine.easeInOut');
+
+    this.time.delayedCall(160, () => {
+      audio.play('pickup');
+      this.tweens.add({
+        targets: c,
+        x: RETURN_SPOT.x, y: RETURN_SPOT.y, rotation: 0,
+        duration: 700, ease: 'cubic.easeout',
+        onComplete: () => {
+          c.setScale(0.94, 0.94);
+          this.tweens.add({
+            targets: c, scaleX: 1, scaleY: 1, duration: 110, ease: 'sine.easeout',
+            onComplete: () => {
+              // landed: normal-sized, immediately draggable, data committed
+              c.setDepth(RETURN_SPOT.y);
+              setLoosePose(this, view, t);
+              t.x = Math.round(RETURN_SPOT.x * 10) / 10;
+              t.y = Math.round(RETURN_SPOT.y * 10) / 10;
+              this.returningTape = false;
+              audio.play('place');
+              this.nudge?.markDirty();
+              this.emitCounters();
+              this.save();
+            },
+          });
+        },
+      });
+    });
     this.emitCounters();
+  }
+
+  // ------------------------------------------------- milestones (v3 §4)
+  /** true when the row is FULL and every seated tape matches its label */
+  rowIsCompleteCorrect(rowId: number): boolean {
+    const row = this.world.rows[rowId];
+    if (row.slots.some(s => s === null)) return false;
+    for (const id of row.slots) {
+      const t = this.tapeData(id as number);
+      if (!t || t.combo !== row.group) return false;
+    }
+    return true;
+  }
+
+  /** cabinet = one physical unit; complete when all 4 rows are complete-correct */
+  cabinetIsCompleteCorrect(u: number): boolean {
+    for (let lr = 0; lr < ROWS_PER_UNIT; lr++) {
+      if (!this.rowIsCompleteCorrect(u * ROWS_PER_UNIT + lr)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Called when a tape FINISHES seating (insert animation end) or seats
+   * instantly (debug path). Edge-triggered: the row milestone fires only on a
+   * false→true transition; the cabinet achievement additionally requires the
+   * permanent record to be absent. A final tape that completes both the row
+   * and its cabinet plays the cabinet sound only (never layered).
+   */
+  onTapeSeatedFinished(rowId: number): void {
+    const u = unitOfRow(rowId);
+    const before = this.rowComplete[rowId] ?? false;
+    const nowComplete = this.rowIsCompleteCorrect(rowId);
+    this.rowComplete[rowId] = nowComplete;
+    if (!nowComplete || before) return; // no transition → nothing (silence is fine:
+    // a full-but-misfiled row earns nothing, and refills after removal re-earn it)
+
+    // does this same completion finish the whole cabinet?
+    const cabinetDone = this.cabinetIsCompleteCorrect(u) && !this.achievements.has(u);
+    if (cabinetDone) {
+      this.achievements.add(u);
+      this.milestoneCounters.cabinets++;
+      this.lastMilestone = { kind: 'cabinet', row: rowId, unit: u, at: this.time.now };
+      audio.play('cabinet'); // fuller, still cozy — replaces the row chime (no layering)
+      this.pulseRow(rowId);
+      const colorName = COLORS[Math.floor(this.world.rows[rowId].group / SYMBOLS.length)].name;
+      const nice = colorName.charAt(0).toUpperCase() + colorName.slice(1);
+      this.game.events.emit('cabinet:complete', { unit: u, color: nice });
+      this.save();
+      return;
+    }
+    this.milestoneCounters.rows++;
+    this.lastMilestone = { kind: 'row', row: rowId, unit: u, at: this.time.now };
+    audio.play('chime'); // Tiny Chime — automatic on the completed row
+    this.pulseRow(rowId);
+  }
+
+  /** brief warm pulse across the completed row (visible even when muted) */
+  private pulseRow(rowId: number): void {
+    if (!this.rowPulseGfx) this.rowPulseGfx = this.add.graphics().setDepth(138999);
+    const g = this.rowPulseGfx;
+    const r = rowRect(rowId);
+    g.clear();
+    g.fillStyle(0xffe9a8, 0.34);
+    g.fillRoundedRect(r.x, r.y, r.w, r.h, 8);
+    g.lineStyle(3, 0xffe9a8, 0.9);
+    g.strokeRoundedRect(r.x, r.y, r.w, r.h, 8);
+    this.tweens.add({
+      targets: g, alpha: { from: 1, to: 0 }, duration: ROW_PULSE_MS, ease: 'sine.easeout',
+      onComplete: () => { g.clear(); g.alpha = 1; },
+    });
   }
 
   // ------------------------------------------------------------- session flow
@@ -434,7 +836,7 @@ export class GameScene extends Phaser.Scene {
         }
       } catch { /* ignore */ }
     }
-    // restore saved v2 run when present (autotest phase 2 uses ?restore=1)
+    // restore saved run when present (autotest phase 2 uses ?restore=1)
     if ((!p.has('autotest') || p.has('restore')) && this.storageOk) {
       const save = loadRun();
       if (save) {
@@ -454,7 +856,14 @@ export class GameScene extends Phaser.Scene {
       return;
     }
     try {
-      const file = serializeRun(this.world, this.skills.unlocked, this.skills.powersSave(), this.playSeconds, this.trayTapes);
+      const file = serializeRun(
+        this.world, this.skills.unlocked, this.skills.powersSave(), this.playSeconds, this.trayTapes,
+        {
+          achievements: [...this.achievements],
+          milestones: { ...this.milestoneCounters },
+          settings: { ...this.settings },
+        },
+      );
       saveRun(file);
     } catch { /* ignore */ }
     this.game.events.emit('save:flash');
@@ -474,15 +883,31 @@ export class GameScene extends Phaser.Scene {
   // ------------------------------------------------------------------ helpers
   tapeAt(id: number): TapeView | undefined { return this.tapeViews.get(id); }
 
+  /** true while a modal UI panel (help/confirm/complete/migrate) blocks the table */
+  uiBlockedFlag(): boolean { return this.uiBlocked; }
+
   tapeData(id: number): Tape | undefined { return this.world.tapes.find(t => t.id === id); }
 
-  /** row under a world point (any row, matching or not — hidden correctness). */
+  /** row under a world point (any row, matching or not — hidden correctness).
+   *  Exact containment wins over edge tolerance: a drop aimed at row N's center
+   *  must never be claimed by row N-1's tolerance zone (checked in id order). */
   rowUnder(x: number, y: number): Row | null {
+    // pass 1: the rect actually contains the point
     for (const row of this.world.rows) {
       const r = rowRect(row.id);
-      if (x >= r.x - 8 && x <= r.x + r.w + 8 && y >= r.y - 10 && y <= r.y + r.h + 10) return row;
+      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return row;
     }
-    return null;
+    // pass 2: the forgiving edge zone (nearest strip, still deterministic)
+    let best: Row | null = null;
+    let bestDist = Infinity;
+    for (const row of this.world.rows) {
+      const r = rowRect(row.id);
+      if (x >= r.x - 8 && x <= r.x + r.w + 8 && y >= r.y - 10 && y <= r.y + r.h + 10) {
+        const dy = y < r.y ? r.y - y : y - (r.y + r.h);
+        if (dy < bestDist) { best = row; bestDist = dy; }
+      }
+    }
+    return best;
   }
 
   unitUnder(x: number, y: number): number | null {
@@ -578,6 +1003,42 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  // ------------------------------------------------------------ v3 settings
+  applySettings(s: Partial<SaveSettings>, persist = true): void {
+    this.settings = { ...this.settings, ...s };
+    audio.setEnabled(this.settings.sound);
+    artState.pilotArt = this.settings.pilotArt;
+    this.setPilotArt(this.settings.pilotArt);
+    if (this.nudge) this.nudge.setEnabled(this.settings.hoverFx, this.settings.reducedMotion);
+    if (persist) this.save();
+    this.game.events.emit('settings:changed', { ...this.settings });
+  }
+
+  /** runtime art-pilot toggle: same geometry, only the corner's textures swap */
+  setPilotArt(on: boolean): void {
+    if (!this.pilotViews) return;
+    const rect = unitRect(ART_PILOT.unit);
+    const useArt = on && this.textures.exists('tt-cabinet');
+    this.pilotViews.body.setTexture(useArt ? 'tt-cabinet' : 'walnut-plain', useArt ? 'body' : undefined);
+    this.pilotViews.body.setOrigin(0, 0).setDisplaySize(rect.w, rect.h);
+    for (const lip of this.pilotViews.lips) lip.setVisible(useArt);
+    for (const g of this.pilotViews.plainLips) g.setVisible(!useArt);
+    if (this.pilotViews.atlasLamp) {
+      this.pilotViews.atlasLamp.setVisible(useArt);
+    }
+    // re-pose the pilot combo's tapes (loose faces + walnut seated spines)
+    for (const view of this.tapeViews.values()) {
+      const t = this.tapeData(view.id);
+      if (!t || t.combo !== ART_PILOT.combo) continue;
+      if (t.state === 'loose') {
+        setLoosePose(this, view, t);
+        view.container.setRotation(t.rot);
+      } else if (t.state === 'shelved' && isPilotUnit(unitOfRow(t.row as number))) {
+        setSeatedPose(this, view, t, unitOfRow(t.row as number));
+      }
+    }
+  }
+
   update(_time: number, delta: number): void {
     const dt = delta / 1000;
     this.playSeconds += dt;
@@ -599,11 +1060,11 @@ export class GameScene extends Phaser.Scene {
     this.drag.update();
     this.skills.update();
 
-    // autosave every 4s of play (debounced further on writes)
+    // autosave every 4s of play (never mid repair-return flight)
     this.saveTimer += dt;
     if (this.saveTimer > 4) {
       this.saveTimer = 0;
-      if (this.drag.held === null && !this.drag.trayBatchDrag) this.save();
+      if (this.drag.held === null && !this.drag.trayBatchDrag && !this.returningTape) this.save();
     }
   }
 
@@ -639,27 +1100,27 @@ export class GameScene extends Phaser.Scene {
     if (!t) return;
     const row = this.world.rows[rowId];
     const view = this.tapeViews.get(id);
+    const u = unitOfRow(rowId);
     t.state = 'shelved';
     t.row = rowId;
     t.slot = slot;
     t.rot = 0;
     row.slots[slot] = id;
     this.sortedCount = this.world.tapes.filter(tt => tt.state === 'shelved').length;
+    this.nudge?.markDirty();
     if (view) {
-      view.face.setVisible(false);
-      if (view.overlay) view.overlay.setVisible(false);
-      view.spine.setVisible(true);
+      setSeatedPose(this, view, t, u);
       const p = slotPos(rowId, slot);
-      const u = unitOfRow(rowId);
       const lr = rowId % ROWS_PER_UNIT;
       if (instant) {
         view.container.setPosition(p.x, p.y).setRotation(0).setDepth(unitPos(u).y + 1 + lr * 0.02);
+        this.onTapeSeatedFinished(rowId); // instant path: milestone fires at once
       }
     }
     this.updateRowCount(rowId);
   }
 
-  /** unshelve (pull-out data path) */
+  /** unshelve (pull-out data path) — recompute the row's completion state */
   unseatTape(id: number): void {
     const t = this.tapeData(id);
     if (!t || t.state !== 'shelved') return;
@@ -669,7 +1130,9 @@ export class GameScene extends Phaser.Scene {
     t.state = 'loose';
     t.row = null; t.slot = null;
     this.updateRowCount(row.id);
+    this.rowComplete[row.id] = this.rowIsCompleteCorrect(row.id);
     this.sortedCount = this.world.tapes.filter(tt => tt.state === 'shelved').length;
+    this.nudge?.markDirty();
   }
 
   debugRepairAll(): number {

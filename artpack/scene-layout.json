@@ -1,0 +1,100 @@
+{
+  "cassette": {
+    "design": "teal-star",
+    "anchors": {
+      "loose": [
+        0.5,
+        0.51
+      ],
+      "turn": [
+        0.226,
+        0.868
+      ],
+      "spine": [
+        0.5,
+        0.973
+      ]
+    },
+    "notes": [
+      "Anchors normalized to individual atlas frames.",
+      "Use loose as the stable drag pose; turn and spine anchors are starting points for insertion staging."
+    ]
+  },
+  "cabinet": {
+    "coordinate_space": "body atlas frame local source pixels, origin top-left",
+    "source_width": 835,
+    "source_height": 1252,
+    "usable_slot_center_x_span": [
+      110,
+      690
+    ],
+    "rows": [
+      {
+        "lip": "lip-1",
+        "overlay_top_left": [
+          62,
+          356
+        ],
+        "seat_y": 361,
+        "visual_clear_height": 211
+      },
+      {
+        "lip": "lip-2",
+        "overlay_top_left": [
+          62,
+          622
+        ],
+        "seat_y": 627,
+        "visual_clear_height": 211
+      },
+      {
+        "lip": "lip-3",
+        "overlay_top_left": [
+          62,
+          892
+        ],
+        "seat_y": 897,
+        "visual_clear_height": 211
+      },
+      {
+        "lip": "lip-4",
+        "overlay_top_left": [
+          62,
+          1156
+        ],
+        "seat_y": 1161,
+        "visual_clear_height": 211
+      }
+    ],
+    "notes": [
+      "Keep existing logical rack IDs, capacities, row colors and symbols.",
+      "Draw each lip overlay above its seated tapes at the same scale and position as the cabinet 'body' art."
+    ]
+  },
+  "lamp": {
+    "frame": "lamp",
+    "base_anchor": [
+      0.25,
+      0.975
+    ],
+    "bulb_anchor": [
+      0.66,
+      0.46
+    ]
+  },
+  "wood": {
+    "tile": "walnut-tile.png",
+    "mirror_repeat_if_needed": true
+  },
+  "lighting": {
+    "ambient_color": "#32221e",
+    "ambient_overlay_alpha": 0.12,
+    "lamp_pool_alpha": 0.36,
+    "bulb_halo_alpha": 0.28,
+    "contact_shadow_alpha": 0.5,
+    "notes": [
+      "Tunable starting values, not requirements.",
+      "Keep glow and shadows in world space, HUD above lighting."
+    ]
+  }
+}

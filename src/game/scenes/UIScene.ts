@@ -1,35 +1,35 @@
 /**
- * Tidy Tapes — fixed HUD scene v2 (own camera, never moves with the world).
+ * Tidy Tapes — fixed HUD scene v3 (own camera, never moves with the world).
  *
- * Bottom-left: six skill chips (powers show 15 s active / 60 s cooldown timers).
- * Bottom-right: the five-slot CARRY TRAY (basic equipment) — load/remove tapes
- * individually, drag the tray onto a row to batch-file what fits. Top-right:
- * zoom + / − / fit-to-table, New Game, help (with a sound-check audition panel
- * for the Magnetic Tuck and Tiny Chime). HUD and text stay upright always.
+ * Top bar: title, counters, Skills icon (opens the compact skills panel — the
+ * v2 always-visible chip strip is gone), help, zoom +/−/fit, New Game, touch
+ * mode. Bottom-right: the five-slot CARRY TRAY (basic equipment) with a flash
+ * when a tape lands in a slot. Bottom-left: a small dev cluster for the v3
+ * pilot comparisons (hover fx / pilot art / sound toggles). Cabinet completions
+ * raise a banner. HUD and text stay upright always and sit OUTSIDE the game
+ * scene's lighting layers.
  */
 import Phaser from 'phaser';
 import { SKILL_THRESHOLDS, TRAY, TRAY_SLOTS } from '../config';
 import { audio } from '../audio';
 import { SKILL_INFO } from '../controllers/SkillsController';
 import { readV1Skills } from '../save';
-import type { SkillId } from '../types';
+import type { SaveSettings, SkillId } from '../types';
 import type { GameScene } from './GameScene';
 
 const CHIP_ORDER: SkillId[] = ['scanner', 'misplaced', 'guide', 'marquee', 'matchScan', 'matchGather'];
 const CREAM = '#f6efdd';
 const WOOD = '#6e4429';
 
-interface ChipViews {
-  bg: Phaser.GameObjects.Graphics;
-  label: Phaser.GameObjects.Text;
-  status: Phaser.GameObjects.Text;
-  zone: Phaser.GameObjects.Zone;
-  power: boolean;
-}
-
 interface TraySlotViews {
   zone: Phaser.GameObjects.Zone;
   chip: Phaser.GameObjects.Image | null;
+}
+
+interface SkillsPanel {
+  container: Phaser.GameObjects.Container;
+  rows: Map<SkillId, { status: Phaser.GameObjects.Text; row: Phaser.GameObjects.Container }>;
+  backdrop: Phaser.GameObjects.Zone;
 }
 
 export class UIScene extends Phaser.Scene {
@@ -38,23 +38,29 @@ export class UIScene extends Phaser.Scene {
   private toastText!: Phaser.GameObjects.Text;
   private hintText!: Phaser.GameObjects.Text;
   private modeButton!: Phaser.GameObjects.Text;
-  private chips = new Map<SkillId, ChipViews>();
+  private skillsButton!: Phaser.GameObjects.Text;
   private trayPanel!: Phaser.GameObjects.Graphics;
   private trayTitle!: Phaser.GameObjects.Text;
   private traySlots: TraySlotViews[] = [];
   private trayCollapseBtn!: Phaser.GameObjects.Text;
   private trayBodyZone!: Phaser.GameObjects.Zone;
   private trayGhost!: Phaser.GameObjects.Text;
+  private trayFlashGfx!: Phaser.GameObjects.Graphics;
+  private trayFlashSlot = -1;
   private toastTween: Phaser.Tweens.Tween | null = null;
   private hintTimer: Phaser.Time.TimerEvent | null = null;
   private completePanel: Phaser.GameObjects.Container | null = null;
   private confirmPanel: Phaser.GameObjects.Container | null = null;
   private helpPanel: Phaser.GameObjects.Container | null = null;
   private migratePanel: Phaser.GameObjects.Container | null = null;
+  private skillsPanel: SkillsPanel | null = null;
+  private cabinetBanner: Phaser.GameObjects.Container | null = null;
   private arrowsGfx!: Phaser.GameObjects.Graphics;
   private matchCountText!: Phaser.GameObjects.Text;
   private arrowLabels: Phaser.GameObjects.Text[] = [];
-  private lastChipDraw = 0;
+  private devToggles: Record<string, Phaser.GameObjects.Text> = {};
+  private settings: SaveSettings = { sound: true, hoverFx: true, pilotArt: true, reducedMotion: false };
+  private lastPanelDraw = 0;
   private W = 1280;
   private H = 720;
   private trayCollapsed = false;
@@ -67,8 +73,8 @@ export class UIScene extends Phaser.Scene {
     this.W = this.scale.width;
     this.H = this.scale.height;
     this.trayCollapsed = false;
-    this.chips = new Map();
     this.traySlots = [];
+    this.devToggles = {};
     this.cameras.main.setBackgroundColor('rgba(0,0,0,0)');
 
     const bar = this.add.graphics();
@@ -92,7 +98,7 @@ export class UIScene extends Phaser.Scene {
     }).setOrigin(0.5, 0);
 
     this.buildTopRight();
-    this.buildChips();
+    this.buildDevCluster();
     this.buildTray();
 
     this.toastText = this.add.text(this.W / 2, 96, '', {
@@ -114,6 +120,7 @@ export class UIScene extends Phaser.Scene {
       fontFamily: 'Georgia, serif', fontSize: '15px', fontStyle: 'bold', color: CREAM,
       backgroundColor: 'rgba(59,47,47,0.9)', padding: { x: 8, y: 4 },
     }).setOrigin(0.5).setDepth(60).setVisible(false);
+    this.trayFlashGfx = this.add.graphics().setDepth(30).setVisible(false);
 
     this.game.events.on('counters', this.onCounters, this);
     this.game.events.on('skills:changed', this.onSkills, this);
@@ -121,6 +128,13 @@ export class UIScene extends Phaser.Scene {
     this.game.events.on('hint', this.showHint, this);
     this.game.events.on('complete', this.showComplete, this);
     this.game.events.on('tray:changed', this.redrawTray, this);
+    this.game.events.on('tray:flash', this.flashTraySlot, this);
+    this.game.events.on('cabinet:complete', this.showCabinetBanner, this);
+    this.game.events.on('skills:panel:toggle', (open: boolean) => {
+      if (open && !this.skillsPanel) this.showSkillsPanel();
+      else if (!open) this.closeSkillsPanel();
+    }, this);
+    this.game.events.on('settings:changed', this.onSettings, this);
     this.game.events.on('migrate:ask', this.showMigrate, this);
     this.game.events.on('game:ready', this.onGameReady, this);
     this.game.events.on('save:flash', this.flashSave, this);
@@ -132,6 +146,10 @@ export class UIScene extends Phaser.Scene {
       this.game.events.off('hint', this.showHint, this);
       this.game.events.off('complete', this.showComplete, this);
       this.game.events.off('tray:changed', this.redrawTray, this);
+      this.game.events.off('tray:flash', this.flashTraySlot, this);
+      this.game.events.off('cabinet:complete', this.showCabinetBanner, this);
+      this.game.events.off('skills:panel:toggle');
+      this.game.events.off('settings:changed', this.onSettings, this);
       this.game.events.off('migrate:ask', this.showMigrate, this);
       this.game.events.off('game:ready', this.onGameReady, this);
       this.game.events.off('save:flash', this.flashSave, this);
@@ -165,11 +183,13 @@ export class UIScene extends Phaser.Scene {
       t.on('pointerdown', () => { audio.unlock(); cb(); });
       return t;
     };
-    mkBtn('?', this.W - 12, () => this.showHelp());
-    mkBtn('fit', this.W - 52, () => this.gameScene()?.fitToTable());
-    mkBtn('−', this.W - 92, () => this.zoomStep(-1));
-    mkBtn('+', this.W - 128, () => this.zoomStep(1));
-    mkBtn('New Game', this.W - 168, () => this.confirmNewGame(), '#ffd9c9', '#8a4a35');
+    // the single fixed Skills icon (v3 §6) — replaces the chips strip
+    this.skillsButton = mkBtn('Skills', this.W - 12, () => this.toggleSkillsPanel(), '#ffd9c9', '#8a4a35');
+    mkBtn('?', this.W - 86, () => this.showHelp());
+    mkBtn('fit', this.W - 126, () => this.gameScene()?.fitToTable());
+    mkBtn('−', this.W - 166, () => this.zoomStep(-1));
+    mkBtn('+', this.W - 202, () => this.zoomStep(1));
+    mkBtn('New Game', this.W - 242, () => this.confirmNewGame(), '#ffd9c9', '#8a4a35');
     this.modeButton = this.add.text(this.W - 12, 40, 'mode: pan (touch)', {
       fontFamily: 'Georgia, serif', fontSize: '12px', color: '#cdbfa5',
     }).setOrigin(1, 0).setInteractive({ useHandCursor: true }).setDepth(20);
@@ -190,42 +210,129 @@ export class UIScene extends Phaser.Scene {
       : 'Pan mode: drag empty table to pan; two fingers anywhere pinch-zoom and pan');
   }
 
-  // ------------------------------------------------------------------- chips
-  private chipW(): number {
-    return Math.min(134, Math.max(96, (this.W - 360) / 6 - 10));
+  // ------------------------------------------------------ dev cluster (v3 pilot)
+  /** bottom-left mini toggles: hover fx / pilot art / sound — the §9/§3 comparators */
+  private buildDevCluster(): void {
+    const mk = (label: string, key: keyof SaveSettings, x: number, cb: () => void) => {
+      const t = this.add.text(x, this.H - 32, label, {
+        fontFamily: 'Georgia, serif', fontSize: '12px', color: CREAM,
+        backgroundColor: '#4a382c', padding: { x: 8, y: 4 },
+      }).setOrigin(0, 1).setInteractive({ useHandCursor: true }).setDepth(22);
+      t.on('pointerdown', () => { audio.unlock(); cb(); });
+      this.devToggles[key as string] = t;
+      return t;
+    };
+    const game = () => this.gameScene();
+    mk('hover fx: on', 'hoverFx', 14, () => {
+      const g = game();
+      if (!g) return;
+      g.applySettings({ hoverFx: !g.settings.hoverFx });
+    });
+    mk('pilot art: on', 'pilotArt', 118, () => {
+      const g = game();
+      if (!g) return;
+      g.applySettings({ pilotArt: !g.settings.pilotArt });
+      this.showToast(g.settings.pilotArt
+        ? 'Art pilot on — walnut cabinet + teal-star tapes + lighting'
+        : 'Art pilot off — procedural fallback look (before mode)');
+    });
+    mk('sound: on', 'sound', 222, () => {
+      const g = game();
+      if (!g) return;
+      g.applySettings({ sound: !g.settings.sound });
+    });
   }
 
-  private buildChips(): void {
-    const cw = this.chipW();
-    let x = 14;
-    const y = this.H - 64;
+  private onSettings(s: SaveSettings): void {
+    this.settings = { ...s };
+    const hov = this.devToggles.hoverFx as Phaser.GameObjects.Text | undefined;
+    if (hov) hov.setText(`hover fx: ${s.hoverFx ? 'on' : 'off'}`);
+    const art = this.devToggles.pilotArt as Phaser.GameObjects.Text | undefined;
+    if (art) art.setText(`pilot art: ${s.pilotArt ? 'on' : 'off'}`);
+    const snd = this.devToggles.sound as Phaser.GameObjects.Text | undefined;
+    if (snd) snd.setText(`sound: ${s.sound ? 'on' : 'off'}`);
+  }
+
+  // ------------------------------------------------------------- skills panel
+  private toggleSkillsPanel(): void {
+    if (this.skillsPanel) this.closeSkillsPanel();
+    else this.showSkillsPanel();
+  }
+
+  private showSkillsPanel(): void {
+    if (this.skillsPanel) return;
+    const w = 320;
+    const h = 336;
+    const x = Math.max(10, this.W - w - 12); // tucked under the Skills icon
+    const y = 62;
+    const container = this.add.container(x, y).setDepth(110);
+
+    const bg = this.add.graphics();
+    bg.fillStyle(0x3b2f2f, 0.96);
+    bg.fillRoundedRect(0, 0, w, h, 12);
+    bg.lineStyle(2, 0xf6efdd, 0.4);
+    bg.strokeRoundedRect(0, 0, w, h, 12);
+    container.add(bg);
+    container.add(this.add.text(16, 10, 'Skills', {
+      fontFamily: 'Georgia, serif', fontSize: '18px', fontStyle: 'bold', color: CREAM,
+    }));
+    container.add(this.add.text(w - 16, 13, '×', {
+      fontFamily: 'Georgia, serif', fontSize: '16px', color: CREAM,
+      backgroundColor: WOOD, padding: { x: 6, y: 2 },
+    }).setOrigin(1, 0).setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.closeSkillsPanel()));
+
+    const rows = new Map<SkillId, { status: Phaser.GameObjects.Text; row: Phaser.GameObjects.Container }>();
+    let ry = 44;
     for (const id of CHIP_ORDER) {
-      const power = id === 'misplaced' || id === 'matchScan' || id === 'matchGather';
-      const bg = this.add.graphics().setDepth(10);
-      const label = this.add.text(x + 20, y - 32, SKILL_INFO[id].name, {
-        fontFamily: 'Georgia, serif', fontSize: '12px', fontStyle: 'bold', color: CREAM,
-      }).setDepth(11);
-      const status = this.add.text(x + 20, y - 14, '', {
-        fontFamily: 'Georgia, serif', fontSize: '10px', color: '#cdbfa5',
-      }).setDepth(11);
-      const zone = this.add.zone(x + 5, y - 40, cw, 54).setOrigin(0, 0)
-        .setInteractive({ useHandCursor: true }).setDepth(12);
-      zone.on('pointerdown', () => this.onChip(id));
-      this.chips.set(id, { bg, label, status, zone, power });
-      x += cw + 12;
+      const info = SKILL_INFO[id];
+      const row = this.add.container(10, ry);
+      const rowBg = this.add.graphics();
+      row.add(rowBg);
+      const name = this.add.text(12, 4, `${info.name}`, {
+        fontFamily: 'Georgia, serif', fontSize: '13px', fontStyle: 'bold', color: CREAM,
+      });
+      const key = this.add.text(12, 24, `key: ${info.key}`, {
+        fontFamily: 'Georgia, serif', fontSize: '11px', color: '#cdbfa5',
+      });
+      const status = this.add.text(w - 76, 12, '', {
+        fontFamily: 'Georgia, serif', fontSize: '11px', color: '#ffe9a8',
+      }).setOrigin(0, 0.5);
+      row.add([name, key, status]);
+      const zone = this.add.zone(w / 2, 24, w - 16, 44).setOrigin(0.5, 0.5)
+        .setInteractive({ useHandCursor: true });
+      zone.on('pointerdown', () => this.onSkillRow(id));
+      row.add(zone);
+      container.add(row);
+      rows.set(id, { status, row });
+      ry += 48;
     }
-    this.lastChipDraw = 0;
-    this.redrawChips(true);
+    container.add(this.add.text(16, h - 26, 'Close: click Skills, click away, or Esc', {
+      fontFamily: 'Georgia, serif', fontSize: '10px', color: '#cdbfa5',
+    }));
+
+    // click-away backdrop (behind the panel visually, on top of everything else)
+    const backdrop = this.add.zone(0, 0, this.W, this.H).setOrigin(0, 0)
+      .setInteractive().setDepth(105);
+    backdrop.on('pointerdown', () => this.closeSkillsPanel());
+
+    this.skillsPanel = { container, rows, backdrop };
+    this.game.registry.set('skillsPanelOpen', true);
+    this.game.registry.set('uiPanelRects', [{ x, y, w, h }]);
+    this.redrawSkillsPanel(true);
   }
 
-  private destroyChips(): void {
-    for (const c of this.chips.values()) {
-      c.bg.destroy(); c.label.destroy(); c.status.destroy(); c.zone.destroy();
-    }
-    this.chips.clear();
+  private closeSkillsPanel(): void {
+    if (!this.skillsPanel) return;
+    this.skillsPanel.container.destroy(true);
+    this.skillsPanel.backdrop.destroy();
+    this.skillsPanel = null;
+    this.game.registry.set('skillsPanelOpen', false);
+    this.game.registry.set('uiPanelRects', undefined);
   }
 
-  private onChip(id: SkillId): void {
+  /** clickable activation route per skill (mirrors the v2 chip behavior) */
+  private onSkillRow(id: SkillId): void {
     audio.unlock();
     const game = this.gameScene();
     if (!game?.skills) return;
@@ -244,49 +351,33 @@ export class UIScene extends Phaser.Scene {
       }
     } else if (id === 'guide') this.showToast(SKILL_INFO.guide.hint);
     else if (id === 'marquee') this.showToast(SKILL_INFO.marquee.hint);
+    this.redrawSkillsPanel(true);
   }
 
-  private redrawChips(force = false): void {
-    if (!force && this.time.now - this.lastChipDraw < 200) return;
-    this.lastChipDraw = this.time.now;
+  private redrawSkillsPanel(force = false): void {
+    if (!this.skillsPanel) return;
+    if (!force && this.time.now - this.lastPanelDraw < 200) return;
+    this.lastPanelDraw = this.time.now;
     const game = this.gameScene();
     const now = game ? game.time.now : 0;
-    const cw = this.chipW();
-    let x = 14;
-    const y = this.H - 64;
+    const sk = game?.skills;
+    let ry = 44;
     for (const id of CHIP_ORDER) {
-      const chip = this.chips.get(id);
-      if (!chip) continue;
-      const unlocked = !!game?.skills?.unlocked[id];
-      let statusText = unlocked ? 'ready' : `at ${SKILL_THRESHOLDS[id]} shelved`;
-      let alpha = 0.55;
-      if (chip.power && game?.skills) {
-        const p = game.skills.powers[id as 'misplaced' | 'matchScan' | 'matchGather'];
-        if (p.activeUntil > now) { statusText = `ACTIVE ${((p.activeUntil - now) / 1000).toFixed(0)}s`; alpha = 1; }
-        else if (p.cooldownUntil > now) { statusText = `cooldown ${((p.cooldownUntil - now) / 1000).toFixed(0)}s`; alpha = 0.45; }
-        else if (unlocked) { statusText = 'ready — click'; alpha = 0.9; }
-      } else if (unlocked) {
-        alpha = 0.9;
-        if (id === 'scanner' && game?.skills?.scannerOn) statusText = 'ON';
-        if (id === 'guide') statusText = 'click a tape';
-        if (id === 'marquee') statusText = 'drag a box';
+      const entry = this.skillsPanel.rows.get(id);
+      if (!entry) continue;
+      const unlocked = !!sk?.unlocked[id];
+      let status = unlocked ? 'ready' : `at ${SKILL_THRESHOLDS[id]} shelved`;
+      if (sk && (id === 'misplaced' || id === 'matchScan' || id === 'matchGather')) {
+        const p = sk.powers[id];
+        if (p.activeUntil > now) status = `ACTIVE ${Math.ceil((p.activeUntil - now) / 1000)}s`;
+        else if (p.cooldownUntil > now) status = `cooldown ${Math.ceil((p.cooldownUntil - now) / 1000)}s`;
       }
-      chip.bg.clear();
-      chip.bg.fillStyle(unlocked ? 0x4a382c : 0x3b3129, alpha);
-      chip.bg.fillRoundedRect(x + 5, y - 40, cw, 54, 10);
-      chip.bg.lineStyle(1.4, 0xf6efdd, unlocked ? 0.55 : 0.25);
-      chip.bg.strokeRoundedRect(x + 5, y - 40, cw, 54, 10);
-      chip.label.setAlpha(unlocked ? 1 : 0.55).setPosition(x + 20, y - 32);
-      chip.status.setText(statusText).setAlpha(unlocked ? 0.9 : 0.6).setPosition(x + 20, y - 14);
-      chip.zone.setPosition(x + 5, y - 40).setSize(cw, 54);
-      x += cw + 12;
+      if (unlocked && id === 'scanner' && sk?.scannerOn) status = 'ON';
+      entry.status.setText(status);
+      entry.row.setY(ry);
+      entry.row.setAlpha(unlocked ? 1 : 0.62);
+      ry += 48;
     }
-  }
-
-  update(): void {
-    this.redrawChips();
-    this.drawOffscreenArrows();
-    this.updateTrayGhost();
   }
 
   // ------------------------------------------------------------------- tray
@@ -376,6 +467,24 @@ export class UIScene extends Phaser.Scene {
     this.trayBodyZone.setPosition(tray.x, tray.y + 4);
   }
 
+  /** quick visual confirmation when a tape lands in a tray slot (double-click etc.) */
+  private flashTraySlot(data: { slot: number }): void {
+    this.trayFlashSlot = data.slot;
+    const game = this.gameScene();
+    const tray = { x: this.W - TRAY.margin - TRAY.w, y: this.H - TRAY.margin - TRAY.h };
+    const sx = tray.x + 14 + data.slot * 56;
+    const sy = tray.y + 26;
+    const g = this.trayFlashGfx;
+    g.clear().setVisible(true);
+    g.lineStyle(3, 0xffe9a8, 0.95);
+    g.strokeRoundedRect(sx, sy, 52, 54, 6);
+    this.tweens.add({
+      targets: g, alpha: { from: 1, to: 0 }, duration: 420, delay: 160,
+      onComplete: () => { g.setVisible(false); g.alpha = 1; },
+    });
+    void game;
+  }
+
   private updateTrayGhost(): void {
     const pos = this.game.registry.get('trayBatchPos') as { x: number; y: number } | null;
     const game = this.gameScene();
@@ -385,6 +494,34 @@ export class UIScene extends Phaser.Scene {
     } else {
       this.trayGhost.setVisible(false);
     }
+  }
+
+  // ----------------------------------------------------- cabinet banner (v3 §4)
+  private showCabinetBanner(data: { unit: number; color: string }): void {
+    // stacked banners are rare (one cabinet at a time): replace an old one
+    if (this.cabinetBanner) { this.cabinetBanner.destroy(true); this.cabinetBanner = null; }
+    const w = 360;
+    const container = this.add.container(this.W / 2, 150).setDepth(130);
+    const bg = this.add.graphics();
+    bg.fillStyle(0x4a382c, 0.96);
+    bg.fillRoundedRect(-w / 2, -30, w, 60, 12);
+    bg.lineStyle(2.5, 0xffe9a8, 0.9);
+    bg.strokeRoundedRect(-w / 2, -30, w, 60, 12);
+    container.add(bg);
+    const t1 = this.add.text(0, -12, `${data.color} Storage Complete`, {
+      fontFamily: 'Georgia, serif', fontSize: '19px', fontStyle: 'bold', color: '#ffe9a8',
+    }).setOrigin(0.5);
+    const t2 = this.add.text(0, 10, 'all four rows matched — beautifully done', {
+      fontFamily: 'Georgia, serif', fontSize: '11px', color: CREAM,
+    }).setOrigin(0.5);
+    container.add([t1, t2]);
+    container.setAlpha(0).setScale(0.92);
+    this.tweens.add({ targets: container, alpha: 1, scale: 1, duration: 260, ease: 'back.easeout' });
+    this.tweens.add({
+      targets: container, alpha: 0, y: 126, delay: 2600, duration: 420, ease: 'sine.easein',
+      onComplete: () => { container.destroy(true); if (this.cabinetBanner === container) this.cabinetBanner = null; },
+    });
+    this.cabinetBanner = container;
   }
 
   // ---------------------------------------------------------- offscreen arrows
@@ -457,6 +594,7 @@ export class UIScene extends Phaser.Scene {
     const game = this.gameScene();
     if (game) {
       this.onSkills();
+      this.onSettings({ ...game.settings });
       game.emitCounters();
       this.redrawTray();
       if (this.game.registry.get('v1SaveFound')) {
@@ -478,10 +616,12 @@ export class UIScene extends Phaser.Scene {
     if (c.repairs !== undefined && c.repairs > 0) bits.push(`to repair ${c.repairs}`);
     bits.push(`seed ${seed}`);
     this.subText.setText(bits.join(' · '));
+    const unlocked = Object.values(game?.skills?.unlocked ?? {}).filter(Boolean).length;
+    this.skillsButton?.setText(`Skills${unlocked > 0 ? ` (${unlocked}/6)` : ''}`);
   }
 
   private onSkills(): void {
-    this.redrawChips(true);
+    this.redrawSkillsPanel(true);
     const game = this.gameScene();
     if (game?.skills) {
       this.modeButton.setText(`mode: ${game.skills.selectMode ? 'select' : 'pan'} (touch)`);
@@ -513,6 +653,12 @@ export class UIScene extends Phaser.Scene {
     this.tweens.add({ targets: txt, alpha: 0, duration: 900, delay: 400, onComplete: () => txt.destroy() });
   }
 
+  update(): void {
+    this.redrawSkillsPanel();
+    this.drawOffscreenArrows();
+    this.updateTrayGhost();
+  }
+
   // ------------------------------------------------------------------ panels
   private showHelp(): void {
     if (this.helpPanel || this.confirmPanel || this.completePanel || this.migratePanel) return;
@@ -524,24 +670,29 @@ export class UIScene extends Phaser.Scene {
       'TWO matching rows on the bench — either row is equally correct. Rows are labeled with',
       'a color chip + symbol. Tapes slot into ANY row with room: a wrong row is accepted',
       'without a peep — the ✓ on an organizer verifies it, and the Misfile Finder reveals',
-      'mistakes. Pull a shelved tape back out any time. Damaged tapes (torn sticker, spilled',
-      'ribbon) need the Repair Bench first; scuffed shells are purely cosmetic.',
+      'mistakes. Pull a shelved tape back out any time. A full, correct row chimes by',
+      'itself; a finished color cabinet raises a banner. Damaged tapes (torn sticker,',
+      'spilled ribbon) need the Repair Bench first; scuffed shells are purely cosmetic.',
       '',
       'Controls',
-      '  · drag a tape — the grab point stays exactly under your cursor',
+      '  · left-drag a tape — the grab point stays exactly under your cursor',
+      '  · left-drag empty table — pan (Space+drag also pans, works while carrying)',
+      '  · double-click a tape — pop it into the carry tray (first empty slot)',
+      '  · right-drag the table — box-select tapes (after Marquee Pickup unlocks)',
       '  · mouse wheel — zoom (centered on the cursor) · + / − / fit — zoom buttons',
-      '  · Space + drag, right-drag, WASD/arrows — pan (works while carrying)',
       '  · carry tray (bottom right) — drop tapes in, drag one out, or drag the tray',
       '    header onto a row to file everything that fits',
+      '  · R — open the repair bench for a damaged tape under the cursor',
       '  · touch: one finger pans empty table, two fingers pinch-zoom + pan',
       '  · D defect scanner · M misfile finder · S match scan · G match gather · F fit',
+      '  · Skills (top right) — every skill, its key, unlock state and cooldowns',
       '',
-      'Skills unlock as you shelve (chips bottom-left). Powers run 15 s with a 60 s',
-      'cooldown and never drop held tapes.',
+      'Pilot corner (top right of the bench): walnut cabinet, teal-star art and the',
+      'lamp lighting. Compare with the bottom-left toggles (pilot art / hover fx).',
     ];
     const game = this.gameScene();
     if (game) lines.push(`Seed: ${game.seed} — replay any run with ?seed=${game.seed}`);
-    const w = Math.min(700, this.W - 60);
+    const w = Math.min(740, this.W - 60);
     const h = 96 + lines.length * 19;
     const px = (this.W - w) / 2;
     const py = Math.max(70, (this.H - h) / 2 - 30);
@@ -559,8 +710,9 @@ export class UIScene extends Phaser.Scene {
       panel.add(b);
     };
     mkSnd('♪ tuck', 0, () => { audio.play('tuck'); this.time.delayedCall(260, () => audio.play('tuk')); });
-    mkSnd('♪ tuck ×5', 92, () => audio.auditionTuckBatch());
-    mkSnd('♪ tiny chime', 196, () => audio.play('chime'));
+    mkSnd('♪ tuck ×5', 92, () => { audio.auditionTuckBatch(); });
+    mkSnd('♪ tiny chime', 196, () => { audio.play('chime'); });
+    mkSnd('♪ cabinet', 320, () => { audio.play('cabinet'); });
   }
 
   private confirmNewGame(): void {
@@ -717,10 +869,10 @@ export class UIScene extends Phaser.Scene {
     this.toastText.setPosition(this.W / 2, 96);
     this.hintText.setPosition(this.W / 2, this.H - 130);
     this.modeButton.setPosition(this.W - 12, 40);
-    this.destroyChips();
-    this.buildChips();
+    for (const t of Object.values(this.devToggles)) t.setPosition(Number(t.x), this.H - 32);
     this.destroyTray();
     this.buildTray();
+    this.closeSkillsPanel();
   }
 
   private destroyTray(): void {

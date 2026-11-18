@@ -15,7 +15,7 @@
 type SfxName =
   | 'pickup' | 'tuck' | 'tuk' | 'thud' | 'invalid'
   | 'unlock' | 'complete' | 'peel' | 'rub-tick' | 'press'
-  | 'squeak' | 'wipe' | 'chime' | 'place' | 'gather';
+  | 'squeak' | 'wipe' | 'chime' | 'place' | 'gather' | 'cabinet' | 'ratchet';
 
 class AudioEngine {
   private ctx: AudioContext | null = null;
@@ -138,7 +138,7 @@ class AudioEngine {
     if ((this.lastPlay[name] ?? -1) > when - 0.025) return;
     this.lastPlay[name] = when;
     this.recent.push({ name, at: Date.now() });
-    if (this.recent.length > 24) this.recent.shift();
+    if (this.recent.length > 64) this.recent.shift();
 
     switch (name) {
       case 'tuck': {
@@ -202,9 +202,19 @@ class AudioEngine {
         this.tone({ when, dur: 0.12, f0: 620, f1: 900, gain: 0.06 * v.gain, type: 'sine' });
         break;
       }
-      case 'chime': { // Tiny Chime: explicit confirmations only (verify / win)
+      case 'chime': { // Tiny Chime: automatic row completion + explicit confirmations
         this.tone({ when, dur: 0.22, f0: 659.25, gain: 0.08 * v.gain, type: 'sine' });
         this.tone({ when: when + 0.06, dur: 0.18, f0: 987.77, gain: 0.04 * v.gain, type: 'sine' });
+        break;
+      }
+      case 'cabinet': { // cabinet completion: fuller, still cozy (never layered over the chime)
+        const notes = [261.63, 329.63, 392, 523.25];
+        notes.forEach((f, i) => this.tone({ when: when + i * 0.1, dur: 0.42, f0: f, gain: 0.085 * v.gain, type: 'triangle' }));
+        this.tone({ when, dur: 0.5, f0: 130.81, gain: 0.05 * v.gain, type: 'sine' });
+        break;
+      }
+      case 'ratchet': { // pencil winding: quiet mechanical tick per real progress
+        this.noise({ when, dur: 0.03, f0: 2600 * v.rate, f1: 1400, gain: 0.05 * v.gain, q: 3 });
         break;
       }
     }

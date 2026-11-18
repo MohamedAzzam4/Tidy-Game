@@ -1,0 +1,113 @@
+{
+  "frames": {
+    "body": {
+      "frame": {
+        "x": 95,
+        "y": 130,
+        "w": 835,
+        "h": 1252
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 835,
+        "h": 1252
+      },
+      "sourceSize": {
+        "w": 835,
+        "h": 1252
+      }
+    },
+    "lip-1": {
+      "frame": {
+        "x": 157,
+        "y": 486,
+        "w": 678,
+        "h": 48
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 678,
+        "h": 48
+      },
+      "sourceSize": {
+        "w": 678,
+        "h": 48
+      }
+    },
+    "lip-2": {
+      "frame": {
+        "x": 157,
+        "y": 752,
+        "w": 678,
+        "h": 48
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 678,
+        "h": 48
+      },
+      "sourceSize": {
+        "w": 678,
+        "h": 48
+      }
+    },
+    "lip-3": {
+      "frame": {
+        "x": 157,
+        "y": 1022,
+        "w": 678,
+        "h": 47
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 678,
+        "h": 47
+      },
+      "sourceSize": {
+        "w": 678,
+        "h": 47
+      }
+    },
+    "lip-4": {
+      "frame": {
+        "x": 157,
+        "y": 1286,
+        "w": 678,
+        "h": 49
+      },
+      "rotated": false,
+      "trimmed": false,
+      "spriteSourceSize": {
+        "x": 0,
+        "y": 0,
+        "w": 678,
+        "h": 49
+      },
+      "sourceSize": {
+        "w": 678,
+        "h": 49
+      }
+    }
+  },
+  "meta": {
+    "image": "cabinet-walnut.png",
+    "format": "RGBA8888",
+    "size": {
+      "w": 1024,
+      "h": 1536
+    },
+    "scale": "1"
+  }
+}

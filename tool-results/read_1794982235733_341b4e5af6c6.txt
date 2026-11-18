@@ -1,0 +1,777 @@
+     1→/**
+     2→ * Tidy Tapes — drag & drop controller (v2).
+     3→ *
+     4→ * Cursor-accurate rule (kept from v1): the grab offset is recomputed from the
+     5→ * ACTIVE camera every frame, so panning/zooming with a stationary pointer keeps
+     6→ * the exact grab point under the cursor; the held tape itself is never tweened.
+     7→ *
+     8→ * v2 semantics:
+     9→ *  - ANY row with a free slot accepts ANY tape (hidden correctness: identical
+    10→ *    preview, motion and sound for matching and misfiled placements).
+    11→ *  - seated spines can be pulled back out and re-filed.
+    12→ *  - a five-slot carry tray (screen-fixed) loads/drops tapes and batches into rows.
+    13→ *  - insertion is a three-beat move: align over the opening, turn broad face ->
+    14→ *    edge-on, slide under the unit's lip (foreground) into the seat.
+    15→ */
+    16→import Phaser from 'phaser';
+    17→import {
+    18→  INSERT_ALIGN_MS, INSERT_SLIDE_MS, INSERT_STAGGER_MS, INSERT_TURN_MS,
+    19→  SPINE_H, SPINE_W, UNITS, UNIT_H, UNIT_W, benchRect, rowRect, slotPos,
+    20→  trayScreenRect, unitOfRow, unitPos,
+    21→} from '../config';
+    22→import { defectBlocksFiling } from '../types';
+    23→import { audio } from '../audio';
+    24→import type { GameScene, TapeView } from '../scenes/GameScene';
+    25→import type { SkillsController } from './SkillsController';
+    26→import type { Row, Tape } from '../types';
+    27→
+    28→interface Held {
+    29→  tapes: TapeView[];
+    30→  lead: TapeView;
+    31→  grabOffset: { x: number; y: number };
+    32→  pointerId: number;
+    33→  origin: Map<number, { x: number; y: number; rot: number }>;
+    34→  fromSelection: boolean;
+    35→  fromGather: boolean;
+    36→  fromTray: boolean;
+    37→  downAt: number;
+    38→  downScreen: { x: number; y: number };
+    39→}
+    40→
+    41→const FAN: [number, number][] = [
+    42→  [0, 0], [-58, 42], [58, 42], [0, 78], [116, 42], [-116, 42], [174, 42], [-174, 42], [232, 42],
+    43→];
+    44→
+    45→export class DragController {
+    46→  scene: GameScene;
+    47→  skills!: SkillsController;
+    48→  held: Held | null = null;
+    49→  /** dragging the whole carry tray (batch file); tapes stay in the tray until insert */
+    50→  trayBatchDrag: { pointerId: number } | null = null;
+    51→  private hoverGlow: Phaser.GameObjects.Graphics;
+    52→  private ghostSpine: Phaser.GameObjects.Image;
+    53→  private hoverRow: number | null = null;
+    54→  private panDrag: { pointerId: number; last: { x: number; y: number } } | null = null;
+    55→  private touchPan: {
+    56→    pointers: number[];
+    57→    centroid: { x: number; y: number };
+    58→    dist: number;
+    59→  } | null = null;
+    60→  private fxGfx: Phaser.GameObjects.Graphics;
+    61→
+    62→  constructor(scene: GameScene) {
+    63→    this.scene = scene;
+    64→    this.hoverGlow = scene.add.graphics().setDepth(200000).setVisible(false);
+    65→    this.ghostSpine = scene.add.image(0, 0, 'spine-0').setDepth(199999).setVisible(false).setAlpha(0.35);
+    66→    this.fxGfx = scene.add.graphics().setDepth(150010);
+    67→  }
+    68→
+    69→  // ------------------------------------------------------------------ pickup
+    70→  onPointerDown(pointer: Phaser.Input.Pointer): void {
+    71→    const cam = this.scene.cameras.main;
+    72→    const wp = cam.getWorldPoint(pointer.x, pointer.y);
+    73→
+    74→    // right/middle button: pan
+    75→    if (pointer.rightButtonDown()) {
+    76→      this.panDrag = { pointerId: pointer.id, last: { x: pointer.x, y: pointer.y } };
+    77→      return;
+    78→    }
+    79→
+    80→    // Space+drag: pan (never conflicts with pickup — even over a tape)
+    81→    if (this.scene.keys?.SPACE?.isDown) {
+    82→      this.panDrag = { pointerId: pointer.id, last: { x: pointer.x, y: pointer.y } };
+    83→      return;
+    84→    }
+    85→
+    86→    // touch: two-finger pinch (zoom + pan); never conflicts with drag or selection
+    87→    if (pointer.wasTouch) {
+    88→      const active = [pointer, ...this.scene.input.manager.pointers].filter(
+    89→        p => p.wasTouch && p.isDown,
+    90→      );
+    91→      const uniq = active.filter((p, i, arr) => arr.findIndex(q => q.id === p.id) === i);
+    92→      if (uniq.length >= 2) {
+    93→        if (this.held) {
+    94→          this.returnHeldToOrigin(this.held);
+    95→          this.held = null;
+    96→        }
+    97→        this.panDrag = null;
+    98→        this.skills?.cancelMarquee();
+    99→        const cx = uniq.reduce((s, p) => s + p.x, 0) / uniq.length;
+   100→        const cy = uniq.reduce((s, p) => s + p.y, 0) / uniq.length;
+   101→        this.touchPan = {
+   102→          pointers: uniq.map(p => p.id),
+   103→          centroid: { x: cx, y: cy },
+   104→          dist: Math.hypot(uniq[0].x - uniq[1].x, uniq[0].y - uniq[1].y) || 1,
+   105→        };
+   106→        return;
+   107→      }
+   108→    }
+   109→
+   110→    // loose tape pickup?
+   111→    const looseView = this.looseTapeAtWorld(wp.x, wp.y);
+   112→    if (looseView && this.held === null) {
+   113→      this.beginDrag(looseView, pointer);
+   114→      return;
+   115→    }
+   116→
+   117→    // seated spine? pull it back out (mistakes are always recoverable)
+   118→    const seatedView = this.seatedTapeAtWorld(wp.x, wp.y);
+   119→    if (seatedView && this.held === null) {
+   120→      this.pullOut(seatedView, pointer);
+   121→      return;
+   122→    }
+   123→
+   124→    // empty-table gesture: marquee only when unlocked (touch needs Select mode);
+   125→    // before unlock the gesture pans the camera (no batch pickup possible).
+   126→    const marqueeArmed =
+   127→      !!this.skills?.unlocked.marquee && (!pointer.wasTouch || this.skills.selectMode);
+   128→    if (marqueeArmed && !pointer.rightButtonDown()) {
+   129→      this.skills.beginMarquee(wp, pointer.id);
+   130→    } else {
+   131→      this.panDrag = { pointerId: pointer.id, last: { x: pointer.x, y: pointer.y } };
+   132→    }
+   133→  }
+   134→
+   135→  private looseTapeAtWorld(x: number, y: number): TapeView | null {
+   136→    let best: TapeView | null = null;
+   137→    let bestDepth = -Infinity;
+   138→    for (const view of this.scene.tapeViews.values()) {
+   139→      const t = this.scene.tapeData(view.id) as Tape;
+   140→      if (t.state !== 'loose') continue;
+   141→      const c = view.container;
+   142→      const dx = x - c.x;
+   143→      const dy = y - c.y;
+   144→      const cos = Math.cos(-c.rotation);
+   145→      const sin = Math.sin(-c.rotation);
+   146→      const lx = dx * cos - dy * sin;
+   147→      const ly = dx * sin + dy * cos;
+   148→      if (Math.abs(lx) <= 46 && Math.abs(ly) <= 30 && c.depth > bestDepth) {
+   149→        best = view;
+   150→        bestDepth = c.depth;
+   151→      }
+   152→    }
+   153→    return best;
+   154→  }
+   155→
+   156→  private seatedTapeAtWorld(x: number, y: number): TapeView | null {
+   157→    for (const view of this.scene.tapeViews.values()) {
+   158→      const t = this.scene.tapeData(view.id) as Tape;
+   159→      if (t.state !== 'shelved') continue;
+   160→      const c = view.container;
+   161→      if (Math.abs(x - c.x) <= SPINE_W / 2 + 5 && Math.abs(y - c.y) <= SPINE_H / 2 + 5) return view;
+   162→    }
+   163→    return null;
+   164→  }
+   165→
+   166→  beginDrag(lead: TapeView, pointer: Phaser.Input.Pointer, fromTray = false): void {
+   167→    const cam = this.scene.cameras.main;
+   168→    const wp = cam.getWorldPoint(pointer.x, pointer.y);
+   169→
+   170→    // group: whole marquee selection (cap 5) or just this tape
+   171→    let group: TapeView[] = [lead];
+   172→    if (this.skills?.unlocked.marquee && this.skills.selection.has(lead.id)) {
+   173→      group = [...this.skills.selection]
+   174→        .map(id => this.scene.tapeViews.get(id))
+   175→        .filter((v): v is TapeView => !!v && this.scene.tapeData(v.id)?.state === 'loose')
+   176→        .slice(0, 5);
+   177→      if (!group.includes(lead)) group.unshift(lead);
+   178→      group = group.slice(0, 5);
+   179→    }
+   180→
+   181→    const origin = new Map<number, { x: number; y: number; rot: number }>();
+   182→    group.forEach((v, i) => {
+   183→      const c = v.container;
+   184→      origin.set(v.id, { x: c.x, y: c.y, rot: c.rotation });
+   185→      c.setDepth(100000 + i);
+   186→      // small pickup pop (juice, not lag — position still tracks the pointer)
+   187→      this.scene.tweens.add({
+   188→        targets: c, scaleX: { from: 1, to: 1.05 }, scaleY: { from: 1, to: 1.05 },
+   189→        duration: 70, yoyo: true, ease: 'sine.easeout',
+   190→      });
+   191→      this.scene.tweens.add({ targets: c, rotation: 0, duration: 80, ease: 'sine.easeout' });
+   192→    });
+   193→
+   194→    this.held = {
+   195→      tapes: group,
+   196→      lead,
+   197→      grabOffset: { x: wp.x - lead.container.x, y: wp.y - lead.container.y },
+   198→      pointerId: pointer.id,
+   199→      origin,
+   200→      fromSelection: this.skills?.selection.has(lead.id) ?? false,
+   201→      fromGather: false,
+   202→      fromTray,
+   203→      downAt: this.scene.time.now,
+   204→      downScreen: { x: pointer.x, y: pointer.y },
+   205→    };
+   206→    audio.play('pickup');
+   207→    this.skills.onGrabSelection(lead.id);
+   208→  }
+   209→
+   210→  /** pull a seated tape out of its slot (flip to broad face + begin drag) */
+   211→  private pullOut(view: TapeView, pointer: Phaser.Input.Pointer): void {
+   212→    const cam = this.scene.cameras.main;
+   213→    const wp = cam.getWorldPoint(pointer.x, pointer.y);
+   214→    const t = this.scene.tapeData(view.id) as Tape;
+   215→    this.scene.unseatTape(t.id);
+   216→    const c = view.container;
+   217→    view.face.setVisible(true);
+   218→    view.spine.setVisible(false);
+   219→    if (view.overlay) view.overlay.setVisible(t.defect !== null && !t.repaired);
+   220→    c.setSize(92, 60);
+   221→    c.setInteractive(new Phaser.Geom.Rectangle(-46, -30, 92, 60), Phaser.Geom.Rectangle.Contains);
+   222→    t.x = c.x; t.y = c.y; t.rot = 0;
+   223→    this.beginDrag(view, pointer);
+   224→    this.scene.emitCounters();
+   225→  }
+   226→
+   227→  /** Match Gather: hold a bundle gathered by the power (compact stack, capped). */
+   228→  holdGathered(views: TapeView[], pointerId: number): void {
+   229→    if (views.length === 0) return;
+   230→    const lead = views[0];
+   231→    const pointer = this.scene.input.manager.pointers.find(p => p.id === pointerId)
+   232→      ?? this.scene.input.activePointer;
+   233→    const wp = this.scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
+   234→    const origin = new Map<number, { x: number; y: number; rot: number }>();
+   235→    views.forEach((v, i) => {
+   236→      const c = v.container;
+   237→      origin.set(v.id, { x: c.x, y: c.y, rot: c.rotation });
+   238→      c.setDepth(100000 + i);
+   239→      const f = FAN[i] ?? [i * 58, 42];
+   240→      this.scene.tweens.add({
+   241→        targets: c, x: wp.x + f[0], y: wp.y + 40 + f[1], rotation: 0,
+   242→        duration: 220, ease: 'cubic.easeout', delay: i * 40,
+   243→      });
+   244→    });
+   245→    this.held = {
+   246→      tapes: views,
+   247→      lead,
+   248→      grabOffset: { x: 0, y: 40 },
+   249→      pointerId,
+   250→      origin,
+   251→      fromSelection: false,
+   252→      fromGather: true,
+   253→      fromTray: false,
+   254→      downAt: this.scene.time.now,
+   255→      downScreen: { x: pointer.x, y: pointer.y },
+   256→    };
+   257→  }
+   258→
+   259→  /** start a whole-tray batch drag (tapes stay in the tray until the drop) */
+   260→  beginTrayBatchDrag(pointer: Phaser.Input.Pointer): void {
+   261→    if (this.trayBatchDrag || this.held) return;
+   262→    if (this.scene.trayIds().length === 0) return;
+   263→    this.trayBatchDrag = { pointerId: pointer.id };
+   264→    this.scene.game.registry.set('trayBatchPos', { x: pointer.x, y: pointer.y });
+   265→  }
+   266→
+   267→  /** drag one tape OUT of a tray slot (the tape becomes a normal held tape) */
+   268→  beginDragFromTray(slot: number, pointer: Phaser.Input.Pointer): void {
+   269→    if (this.held || this.trayBatchDrag) return;
+   270→    const scene = this.scene;
+   271→    const id = scene.trayTapes[slot];
+   272→    if (id === null) return;
+   273→    scene.trayRemoveAt(slot); // data: tray slot freed, view restored
+   274→    const view = scene.tapeViews.get(id);
+   275→    const t = scene.tapeData(id);
+   276→    if (!view || !t) return;
+   277→    const cam = scene.cameras.main;
+   278→    const wp = cam.getWorldPoint(pointer.x, pointer.y);
+   279→    const c = view.container;
+   280→    view.face.setVisible(true).setAlpha(1).setScale(1);
+   281→    view.spine.setVisible(false);
+   282→    if (view.overlay) view.overlay.setVisible(t.defect !== null && !t.repaired);
+   283→    c.setVisible(true).setPosition(wp.x, wp.y).setRotation(0).setScale(1).setAlpha(1);
+   284→    c.setSize(92, 60);
+   285→    c.setInteractive(new Phaser.Geom.Rectangle(-46, -30, 92, 60), Phaser.Geom.Rectangle.Contains);
+   286→    t.state = 'loose';
+   287→    t.x = wp.x; t.y = wp.y; t.rot = 0; t.row = null; t.slot = null;
+   288→    scene.emitCounters();
+   289→    this.beginDrag(view, pointer, true);
+   290→  }
+   291→
+   292→  // ------------------------------------------------------------------- frame
+   293→  onPointerMove(pointer: Phaser.Input.Pointer): void {
+   294→    if (this.trayBatchDrag && pointer.id === this.trayBatchDrag.pointerId) {
+   295→      this.scene.game.registry.set('trayBatchPos', { x: pointer.x, y: pointer.y });
+   296→      return;
+   297→    }
+   298→    if (this.panDrag && pointer.id === this.panDrag.pointerId) {
+   299→      const dx = pointer.x - this.panDrag.last.x;
+   300→      const dy = pointer.y - this.panDrag.last.y;
+   301→      this.panDrag.last = { x: pointer.x, y: pointer.y };
+   302→      this.scene.panCamera(-dx, -dy);
+   303→      return;
+   304→    }
+   305→    if (this.touchPan) {
+   306→      const tp = this.touchPan;
+   307→      const active = this.scene.input.manager.pointers.filter(p => p.isDown && tp.pointers.includes(p.id));
+   308→      if (active.length >= 2) {
+   309→        const cx = active.reduce((s, p) => s + p.x, 0) / active.length;
+   310→        const cy = active.reduce((s, p) => s + p.y, 0) / active.length;
+   311→        this.scene.panCamera(this.touchPan.centroid.x - cx, this.touchPan.centroid.y - cy);
+   312→        const dist = Math.hypot(active[0].x - active[1].x, active[0].y - active[1].y) || 1;
+   313→        if (Math.abs(dist - tp.dist) > 1.5) {
+   314→          this.scene.zoomAt(cx, cy, this.scene.cameras.main.zoom * (dist / tp.dist));
+   315→          tp.dist = dist;
+   316→        }
+   317→        tp.centroid = { x: cx, y: cy };
+   318→      }
+   319→      return;
+   320→    }
+   321→    if (this.held === null && this.skills?.marqueeActive && pointer.id === this.skills.marqueePointerId) {
+   322→      const wp = this.scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
+   323→      this.skills.updateMarquee(wp);
+   324→    }
+   325→  }
+   326→
+   327→  update(): void {
+   328→    // self-heal: if a pointerup was ever swallowed (input edge cases), resolve
+   329→    // the dangling drag at the pointer's last position instead of freezing it
+   330→    if (this.trayBatchDrag) {
+   331→      const bp = this.scene.input.manager.pointers.find(p => p.id === this.trayBatchDrag!.pointerId);
+   332→      if (bp && !bp.isDown) this.resolveTrayBatch(bp);
+   333→      return;
+   334→    }
+   335→    const held = this.held;
+   336→    if (held) {
+   337→      const hp = this.scene.input.manager.pointers.find(p => p.id === held.pointerId)
+   338→        ?? this.scene.input.activePointer;
+   339→      if (!hp.isDown) { this.onPointerUp(hp); return; }
+   340→    }
+   341→    if (!held) { this.updateHover(null, null); return; }
+   342→    // cursor-accurate: recompute every frame from the ACTIVE camera
+   343→    const pointer = this.scene.input.manager.pointers.find(p => p.id === held.pointerId)
+   344→      ?? this.scene.input.activePointer;
+   345→    const wp = this.scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
+   346→    const leadX = wp.x - held.grabOffset.x;
+   347→    const leadY = wp.y - held.grabOffset.y;
+   348→    held.lead.container.setPosition(leadX, leadY);
+   349→    for (let i = 1; i < held.tapes.length; i++) {
+   350→      const f = FAN[i] ?? [i * 60, 60];
+   351→      held.tapes[i].container.setPosition(leadX + f[0], leadY + f[1]);
+   352→    }
+   353→
+   354→    // hover slot preview: ANY row with a free slot, nearest to the pointer.
+   355→    // Identical presentation for every tape (no correctness information).
+   356→    const leadTape = this.scene.tapeData(held.lead.id) as Tape;
+   357→    const row = this.scene.rowUnder(wp.x, wp.y);
+   358→    const previewable = !defectBlocksFiling(leadTape.defect) || leadTape.repaired;
+   359→    if (row && previewable) {
+   360→      const freeSlots: number[] = [];
+   361→      row.slots.forEach((s, i) => { if (s === null) freeSlots.push(i); });
+   362→      if (freeSlots.length > 0) {
+   363→        let nearest = freeSlots[0];
+   364→        let bestD = Infinity;
+   365→        for (const k of freeSlots) {
+   366→          const p = slotPos(row.id, k);
+   367→          const d = Math.abs(p.x - wp.x);
+   368→          if (d < bestD) { bestD = d; nearest = k; }
+   369→        }
+   370→        this.updateHover(row.id, nearest);
+   371→        return;
+   372→      }
+   373→    }
+   374→    this.updateHover(null, null);
+   375→  }
+   376→
+   377→  private updateHover(rowId: number | null, slot: number | null): void {
+   378→    const same = rowId === this.hoverRow;
+   379→    if (same && rowId !== null && slot !== null && this.ghostSpine.visible) {
+   380→      const p = slotPos(rowId, slot);
+   381→      this.ghostSpine.setPosition(p.x, p.y);
+   382→      return;
+   383→    }
+   384→    this.hoverRow = rowId;
+   385→    if (rowId === null || slot === null) {
+   386→      this.hoverGlow.setVisible(false);
+   387→      this.ghostSpine.setVisible(false);
+   388→      return;
+   389→    }
+   390→    const p = slotPos(rowId, slot);
+   391→    this.hoverGlow.clear().setVisible(true);
+   392→    this.hoverGlow.lineStyle(2.5, 0xf6efdd, 0.95);
+   393→    this.hoverGlow.fillStyle(0xf6efdd, 0.12);
+   394→    this.hoverGlow.fillRoundedRect(p.x - 10, p.y - SPINE_H / 2 - 2, 20, SPINE_H + 4, 4);
+   395→    this.hoverGlow.strokeRoundedRect(p.x - 10, p.y - SPINE_H / 2 - 2, 20, SPINE_H + 4, 4);
+   396→    const leadTape = this.held ? this.scene.tapeData(this.held.lead.id) as Tape : null;
+   397→    if (leadTape) {
+   398→      this.ghostSpine.setTexture(`spine-${leadTape.combo}`).setPosition(p.x, p.y).setVisible(true);
+   399→    }
+   400→  }
+   401→
+   402→  // -------------------------------------------------------------------- drop
+   403→  onPointerUp(pointer: Phaser.Input.Pointer): void {
+   404→    if (this.panDrag) { this.panDrag = null; return; }
+   405→    if (this.touchPan) { this.touchPan = null; return; }
+   406→    if (this.skills?.marqueeActive) {
+   407→      this.skills.endMarquee();
+   408→      return;
+   409→    }
+   410→    if (this.trayBatchDrag) {
+   411→      if (pointer.id === this.trayBatchDrag.pointerId) this.resolveTrayBatch(pointer);
+   412→      return;
+   413→    }
+   414→    const held = this.held;
+   415→    if (!held) return;
+   416→
+   417→    // click (no drag, quick): selection for Slot Guide / powers / repair open
+   418→    const moved = Math.hypot(pointer.x - held.downScreen.x, pointer.y - held.downScreen.y);
+   419→    const elapsed = this.scene.time.now - held.downAt;
+   420→    if (moved < 7 && elapsed < 260) {
+   421→      this.returnHeldToOrigin(held);
+   422→      this.held = null;
+   423→      this.skills.onTapeClick(held.lead.id);
+   424→      return;
+   425→    }
+   426→
+   427→    const cam = this.scene.cameras.main;
+   428→    const wp = cam.getWorldPoint(pointer.x, pointer.y);
+   429→    const row = this.scene.rowUnder(wp.x, wp.y);
+   430→    const onBench = this.scene.benchUnder(wp.x, wp.y);
+   431→    const leadTape = this.scene.tapeData(held.lead.id) as Tape;
+   432→    const tray = trayScreenRect(this.scene.scale.width, this.scene.scale.height);
+   433→    const overTray = pointer.x >= tray.x && pointer.x <= tray.x + tray.w
+   434→      && pointer.y >= tray.y - 10 && pointer.y <= tray.y + tray.h + 10;
+   435→
+   436→    // drop onto the carry tray: load what fits, extras return to their spots
+   437→    if (overTray) {
+   438→      this.loadIntoTray(held);
+   439→      return;
+   440→    }
+   441→
+   442→    // any row with a free slot accepts any tape (hidden correctness)
+   443→    if (row) {
+   444→      const insertable = held.tapes.filter(v => {
+   445→        const t = this.scene.tapeData(v.id) as Tape;
+   446→        return t.repaired || !defectBlocksFiling(t.defect);
+   447→      });
+   448→      if (insertable.length > 0) {
+   449→        this.held = null;
+   450→        this.commitBatchInsert(insertable, row.id, wp.x, held);
+   451→        return;
+   452→      }
+   453→      // defective tapes refuse with the visible-damage hint (not a misfile tell)
+   454→      this.refuseDefective(held);
+   455→      return;
+   456→    }
+   457→    if (onBench && leadTape.defect && !leadTape.repaired) {
+   458→      const others = held.tapes.filter(v => v !== held.lead);
+   459→      this.held = null;
+   460→      this.scene.skills.openRepair(leadTape.id, others);
+   461→      return;
+   462→    }
+   463→
+   464→    // plain table drop (also the safe path for leftover batches)
+   465→    const fromSel = held.fromSelection;
+   466→    this.releaseHeldOnTable(held.tapes, wp);
+   467→    this.held = null;
+   468→    if (fromSel) this.skills.clearSelection();
+   469→  }
+   470→
+   471→  /** load the held group into free tray slots; extras go back to their origin */
+   472→  private loadIntoTray(held: Held): void {
+   473→    const scene = this.scene;
+   474→    const free = scene.trayFreeSlots();
+   475→    if (free === 0) {
+   476→      // a full tray never swallows a sixth tape
+   477→      audio.play('invalid');
+   478→      scene.game.events.emit('hint', 'The tray is full (5/5)');
+   479→      const ptr = scene.input.manager.pointers.find(p => p.id === held.pointerId)
+   480→        ?? scene.input.activePointer;
+   481→      const wp = scene.cameras.main.getWorldPoint(ptr.x, ptr.y);
+   482→      this.releaseHeldOnTable(held.tapes, wp);
+   483→      this.held = null;
+   484→      return;
+   485→    }
+   486→    const load = held.tapes.slice(0, free);
+   487→    const extras = held.tapes.slice(free);
+   488→    const origin = held.origin;
+   489→    this.held = null;
+   490→    for (const v of load) {
+   491→      scene.trayLoad(v.id);
+   492→      const c = v.container;
+   493→      scene.tweens.add({
+   494→        targets: c, scaleX: { from: 1, to: 0.9 }, scaleY: { from: 1, to: 0.9 }, alpha: 0,
+   495→        duration: 160, ease: 'sine.easein',
+   496→        onComplete: () => { c.setScale(1); c.setVisible(false); },
+   497→      });
+   498→    }
+   499→    audio.play('place');
+   500→    if (extras.length > 0) {
+   501→      this.returnHeldToOrigin({ ...held, tapes: extras, origin });
+   502→      scene.game.events.emit('hint', `Tray took ${load.length} — ${extras.length} stayed on the table`);
+   503→    }
+   504→    scene.emitCounters();
+   505→    scene.save();
+   506→  }
+   507→
+   508→  /** tray batch drop: insert tray tapes into the row under the pointer, keep the rest */
+   509→  private resolveTrayBatch(pointer: Phaser.Input.Pointer): void {
+   510→    this.trayBatchDrag = null;
+   511→    this.scene.game.registry.set('trayBatchPos', null);
+   512→    const cam = this.scene.cameras.main;
+   513→    const wp = cam.getWorldPoint(pointer.x, pointer.y);
+   514→    const row = this.scene.rowUnder(wp.x, wp.y);
+   515→    if (!row) return; // dropped nowhere: the tray keeps its tapes (cancel)
+   516→    const ids = this.scene.trayIds();
+   517→    const insertable = ids.map(id => this.scene.tapeData(id) as Tape)
+   518→      .filter(t => t.repaired || !defectBlocksFiling(t.defect));
+   519→    if (insertable.length === 0) {
+   520→      audio.play('invalid');
+   521→      this.scene.game.events.emit('hint', 'Those need repairs before they can be filed');
+   522→      return;
+   523→    }
+   524→    const freeSlots: number[] = [];
+   525→    row.slots.forEach((s, i) => { if (s === null) freeSlots.push(i); });
+   526→    const views = insertable.slice(0, freeSlots.length).map(t => this.scene.tapeViews.get(t.id))
+   527→      .filter((v): v is TapeView => !!v);
+   528→    if (views.length === 0) return;
+   529→    const restCount = ids.length - views.length;
+   530→    // remove from tray (data), place views above the row, then the shared insert path
+   531→    for (const v of views) {
+   532→      this.scene.trayRemoveTape(v.id);
+   533→      const t = this.scene.tapeData(v.id) as Tape;
+   534→      const p = slotPos(row.id, 0);
+   535→      v.container.setVisible(true).setPosition(p.x, p.y - 60).setRotation(0).setAlpha(1).setScale(1);
+   536→      v.face.setVisible(true);
+   537→      v.spine.setVisible(false);
+   538→      if (v.overlay) v.overlay.setVisible(t.defect !== null && !t.repaired);
+   539→      t.state = 'loose';
+   540→      t.x = p.x; t.y = p.y - 60; t.rot = 0;
+   541→    }
+   542→    this.commitBatchInsert(views, row.id, wp.x, null, true);
+   543→    if (restCount > 0) {
+   544→      this.scene.game.events.emit('hint', `Only ${views.length} fit — ${restCount} stayed in the tray`);
+   545→    }
+   546→  }
+   547→
+   548→  /** invalid drop for damaged tapes: gentle shake + damage hint (visible damage) */
+   549→  private refuseDefective(held: Held): void {
+   550→    audio.play('invalid');
+   551→    this.scene.game.events.emit('hint', 'This one needs a repair first (drop it on the bench)');
+   552→    held.tapes.forEach(view => {
+   553→      const c = view.container;
+   554→      this.scene.tweens.add({
+   555→        targets: c, x: { from: c.x, to: c.x + 8 }, duration: 50, yoyo: true, repeat: 3,
+   556→      });
+   557→    });
+   558→    this.returnHeldToOrigin(held);
+   559→    this.held = null;
+   560→  }
+   561→
+   562→  /**
+   563→   * Slot reservation happens immediately (race-free, save-consistent);
+   564→   * presentation: align -> turn -> slide under the lip, staggered per tape.
+   565→   */
+   566→  private commitBatchInsert(
+   567→    tapes: TapeView[], rowId: number, wpX: number, held: Held | null, fromTray = false,
+   568→  ): void {
+   569→    const scene = this.scene;
+   570→    const row = scene.world.rows[rowId];
+   571→    const freeSlots: number[] = [];
+   572→    row.slots.forEach((s, i) => { if (s === null) freeSlots.push(i); });
+   573→    // nearest-to-pointer slot first, outward
+   574→    freeSlots.sort((a, b) =>
+   575→      Math.abs(slotPos(rowId, a).x - wpX) - Math.abs(slotPos(rowId, b).x - wpX));
+   576→
+   577→    const toInsert = tapes.slice(0, freeSlots.length);
+   578→    const leftovers = tapes.slice(freeSlots.length);
+   579→
+   580→    toInsert.forEach((view, i) => {
+   581→      const slotIdx = freeSlots[i];
+   582→      scene.seatTape(view.id, rowId, slotIdx); // data commit before any tween
+   583→      this.animateInsert(view, rowId, slotIdx, i * INSERT_STAGGER_MS);
+   584→    });
+   585→
+   586→    scene.skills.onShelved(scene.sortedCount);
+   587→    scene.emitCounters();
+   588→    scene.checkCompletion();
+   589→    scene.save();
+   590→    this.updateHover(null, null);
+   591→
+   592→    if (leftovers.length) {
+   593→      if (fromTray || held?.fromTray) {
+   594→        // leftovers came out of the tray / batch: keep them there
+   595→        for (const v of leftovers) scene.trayLoad(v.id);
+   596→      } else {
+   597→        const r = rowRect(rowId);
+   598→        const fan = { x: r.x + r.w / 2 + 24, y: r.y + r.h + 58 };
+   599→        scene.time.delayedCall(toInsert.length * INSERT_STAGGER_MS + 120, () => {
+   600→          this.releaseHeldOnTable(leftovers, fan);
+   601→        });
+   602→        scene.game.events.emit('hint', 'No free slots left in that row — the rest wait below');
+   603→      }
+   604→    }
+   605→    if (held?.fromSelection) this.skills.clearSelection();
+   606→  }
+   607→
+   608→  /**
+   609→   * The money shot: align over the opening, turn broad-face -> edge-on, slide a
+   610→   * short visible distance under the unit lip, seat with a soft tuck.
+   611→   */
+   612→  private animateInsert(view: TapeView, rowId: number, slot: number, delayMs: number): void {
+   613→    const scene = this.scene;
+   614→    const target = slotPos(rowId, slot);
+   615→    const u = unitOfRow(rowId);
+   616→    const lr = rowId % 4;
+   617→    const seatDepth = unitPos(u).y + 1 + lr * 0.02;
+   618→    const slideDepth = unitPos(u).y + 1.5; // under the lip overlay, over the body
+   619→    const c = view.container;
+   620→    scene.time.delayedCall(delayMs, () => {
+   621→      if (view.overlay) view.overlay.setVisible(false);
+   622→      audio.play('tuck'); // soft descending shff starts as the tape begins to enter
+   623→      // beat 1: align over the selected opening
+   624→      scene.tweens.add({
+   625→        targets: c, x: target.x, y: target.y - 40, rotation: 0,
+   626→        duration: INSERT_ALIGN_MS, ease: 'sine.easeout',
+   627→        onComplete: () => {
+   628→          // beat 2: turn broad face -> edge-on
+   629→          scene.tweens.add({
+   630→            targets: view.face, alpha: { from: 1, to: 0 }, scaleX: { from: 1, to: 0.25 },
+   631→            duration: INSERT_TURN_MS, ease: 'sine.easein',
+   632→          });
+   633→          view.spine.setAlpha(0).setVisible(true);
+   634→          scene.tweens.add({
+   635→            targets: view.spine, alpha: { from: 0, to: 1 }, duration: INSERT_TURN_MS, ease: 'sine.easeout',
+   636→            onComplete: () => { view.face.setVisible(false).setAlpha(1).setScale(1); },
+   637→          });
+   638→          scene.time.delayedCall(INSERT_TURN_MS, () => {
+   639→            c.setDepth(slideDepth);
+   640→            this.drawMotionStrokes(target.x, target.y - 26);
+   641→            // beat 3: slide under the lip into the seat
+   642→            scene.tweens.add({
+   643→              targets: c, y: target.y, duration: INSERT_SLIDE_MS, ease: 'sine.easeinout',
+   644→              onComplete: () => {
+   645→                audio.play('tuk'); // muted plastic tuck exactly when it seats
+   646→                c.setDepth(seatDepth);
+   647→                scene.tweens.add({
+   648→                  targets: c, scaleY: { from: 1, to: 0.92 }, duration: 55, yoyo: true, ease: 'sine.easein',
+   649→                  onComplete: () => c.setScale(1, 1),
+   650→                });
+   651→              },
+   652→            });
+   653→          });
+   654→        },
+   655→      });
+   656→    });
+   657→  }
+   658→
+   659→  /** two short, quiet curved motion strokes behind the entering tape (one pair) */
+   660→  private drawMotionStrokes(x: number, y: number): void {
+   661→    try {
+   662→      const g = this.fxGfx;
+   663→      g.clear();
+   664→      g.lineStyle(2.4, 0xf6efdd, 0.55);
+   665→      for (const side of [-1, 1]) {
+   666→        const bx = x + side * 14;
+   667→        const cx = bx + side * 7;
+   668→        // quadratic as a bezier with coincident control points (Graphics has
+   669→        // no quadraticCurveTo in Phaser 3.90 — calling it killed the RAF loop)
+   670→        g.beginPath();
+   671→        g.moveTo(bx, y - 26);
+   672→        g.bezierCurveTo(cx, y - 12, cx, y - 12, bx, y + 2);
+   673→        g.strokePath();
+   674→      }
+   675→      scene_tween(this.scene, g, { alpha: 0 }, 260, () => g.clear());
+   676→    } catch { /* fx must never break the game loop */ }
+   677→  }
+   678→
+   679→  /** release a set of tapes onto the table in a readable fan; never lost */
+   680→  releaseHeldOnTable(tapes: TapeView[], anchor: { x: number; y: number }): void {
+   681→    tapes.forEach((view, i) => {
+   682→      const t = this.scene.tapeData(view.id) as Tape;
+   683→      const f = FAN[i] ?? [i * 60, 60];
+   684→      const spot = this.findTableSpot(anchor.x + f[0], anchor.y + f[1]);
+   685→      const c = view.container;
+   686→      c.setPosition(spot.x, spot.y).setRotation(0).setDepth(spot.y);
+   687→      this.scene.tweens.add({ targets: c, scaleY: { from: 0.92, to: 1 }, duration: 90, ease: 'sine.easeout' });
+   688→      if (view.overlay) view.overlay.setVisible(t.defect !== null && !t.repaired);
+   689→      t.x = Math.round(spot.x * 10) / 10;
+   690→      t.y = Math.round(spot.y * 10) / 10;
+   691→      t.rot = 0;
+   692→      t.state = 'loose';
+   693→      t.row = null; t.slot = null;
+   694→      this.scene.time.delayedCall(i * 60, () => audio.play('place'));
+   695→    });
+   696→    this.scene.emitCounters();
+   697→    this.scene.save();
+   698→  }
+   699→
+   700→  findTableSpotPublic(x: number, y: number): { x: number; y: number } {
+   701→    return this.findTableSpot(x, y);
+   702→  }
+   703→
+   704→  /** nearest valid table position (bounds + out of units/bench) */
+   705→  private findTableSpot(x: number, y: number): { x: number; y: number } {
+   706→    const WORLD_W = this.scene.world.worldW;
+   707→    const WORLD_H = this.scene.world.worldH;
+   708→    const inAnyRect = (
+   709→      px: number, py: number,
+   710→      rects: { x: number; y: number; w: number; h: number }[], padX: number, padY: number,
+   711→    ): { x: number; y: number; w: number; h: number } | null => {
+   712→      for (const r of rects) {
+   713→        if (px >= r.x - padX && px <= r.x + r.w + padX && py >= r.y - padY && py <= r.y + r.h + padY) return r;
+   714→      }
+   715→      return null;
+   716→    };
+   717→    let px = Phaser.Math.Clamp(x, 70, WORLD_W - 70);
+   718→    let py = Phaser.Math.Clamp(y, 90, WORLD_H - 70);
+   719→    const unitRects = [...Array(UNITS).keys()].map(uu => {
+   720→      const p = unitPos(uu);
+   721→      return { x: p.x, y: p.y, w: UNIT_W, h: UNIT_H };
+   722→    });
+   723→    for (let attempt = 0; attempt < 4; attempt++) {
+   724→      let moved = false;
+   725→      const ur = inAnyRect(px, py, unitRects, 44, 38);
+   726→      if (ur) { py = ur.y + ur.h + 54 + attempt * 16; moved = true; }
+   727→      const b = benchRect();
+   728→      if (px >= b.x - 44 && px <= b.x + b.w + 44 && py >= b.y - 44 && py <= b.y + b.h + 44) {
+   729→        px = b.x + b.w + 60 + attempt * 20;
+   730→        moved = true;
+   731→      }
+   732→      if (!moved) break;
+   733→      px = Phaser.Math.Clamp(px, 70, WORLD_W - 70);
+   734→      py = Phaser.Math.Clamp(py, 90, WORLD_H - 70);
+   735→    }
+   736→    return { x: px, y: py };
+   737→  }
+   738→
+   739→  /** cancel (Esc): everything returns exactly to where it was picked up */
+   740→  cancel(): void {
+   741→    if (this.trayBatchDrag) {
+   742→      this.trayBatchDrag = null;
+   743→      this.scene.game.registry.set('trayBatchPos', null);
+   744→      return;
+   745→    }
+   746→    if (this.held) {
+   747→      const held = this.held;
+   748→      this.held = null;
+   749→      if (held.fromTray) {
+   750→        for (const v of held.tapes) this.scene.trayLoad(v.id);
+   751→        return;
+   752→      }
+   753→      this.returnHeldToOrigin(held);
+   754→    }
+   755→    this.panDrag = null;
+   756→    this.touchPan = null;
+   757→  }
+   758→
+   759→  private returnHeldToOrigin(held: Held): void {
+   760→    held.tapes.forEach(view => {
+   761→      const o = held.origin.get(view.id);
+   762→      if (!o) return;
+   763→      const t = this.scene.tapeData(view.id) as Tape;
+   764→      const c = view.container;
+   765→      c.setPosition(o.x, o.y).setRotation(o.rot).setDepth(o.y);
+   766→      t.x = o.x; t.y = o.y; t.rot = o.rot;
+   767→    });
+   768→  }
+   769→}
+   770→
+   771→function scene_tween(
+   772→  scene: Phaser.Scene, targets: Phaser.GameObjects.Graphics,
+   773→  props: { alpha: number }, duration: number, onComplete: () => void,
+   774→): void {
+   775→  scene.tweens.add({ targets, ...props, duration, ease: 'sine.easeout', onComplete });
+   776→}
+   777→
