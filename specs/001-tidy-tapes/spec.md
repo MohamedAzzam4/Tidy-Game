@@ -1,132 +1,130 @@
-# Tidy Tapes — Specification (spec.md) — v2 follow-up
+# Tidy Tapes — Specification (spec.md) — v3 playtest fixes + art/lighting pilot
 
-**Feature:** 001-tidy-tapes · Cozy cassette-sorting shop · Status: v2 reviewed (see review.md)
+**Feature:** 001-tidy-tapes · Cozy cassette-sorting shop · Status: v3 in progress on the v2 build
+(branch `tidy-tapes`, commit 76f9e3f — 20/20 autotest green is the baseline, NOT proof the
+v3 cases work; every case below is reproduced first, then fixed, then re-tested).
 
-> Spec Kit CLI (`specify`) is not installed in this sandbox. The specify → plan → tasks →
-> analyze steps are followed **manually**; no slash command ran. v1 shipped; this spec is the
-> consolidated follow-up applied to the **same Phaser project** (keep working repair/skill/
-> save systems; no new engine, no mockup).
+> Spec Kit CLI still not installed; specify → plan → tasks → analyze are manual as in v1/v2.
+> Source of requirements: `upload/Tidy-Tapes-v3-Playtest-Fixes.md` + `Tidy-Tapes-Starter-Art-Pack.zip`
+> (README.md + scene-layout.json read in full). Do not rebuild the game; iterate the existing
+> Phaser 3.90 project. Every checkpoint (including this planning stage) is pushed to GitHub on
+> its own branch.
 
-## Baseline (captured before v2 work)
+## Baseline (v2, kept)
 
-- Screenshot: `download/baseline-v1-wide.png` (seed 20261118, 512 tapes, world 4400×3000).
-- Confirmed problems: straight-on flat view with no depth; 64 tiny racks spread far apart;
-  center/left of the table largely empty; corner-biased tape piles.
-- File ownership: board generator `src/game/worldgen.ts` (+ `config.ts` geometry), renderer
-  `src/game/textures.ts` + `src/game/scenes/GameScene.ts`, input
-  `src/game/controllers/DragController.ts` (+ GameScene.setupInput), storage (racks/slots:
-  GameScene + DragController + `types.ts`), progression `src/game/controllers/SkillsController.ts`,
-  audio `src/game/audio.ts`, save `src/game/save.ts`, tests `src/game/__tests__/` +
-  `src/game/autotest.ts`.
+432-tape board (8 colors × 4 symbols × 2 interchangeable rows), 16 rack units in 3 banks,
+hidden misfiles (identical feedback for every accepted placement), five-slot carry tray,
+wheel zoom @cursor, Space/right/WASD pan, six skills with 15 s/60 s powers, three repairs,
+save v2 + v1 migration choice, Magnetic Tuck on every insertion, Tiny Chime only on explicit
+verify/win. File ownership unchanged (see spec.md v2).
 
-## Problem
+## v3 requirements (user stories)
 
-The same cozy cassette shop, now with a fixed gentle three-quarter 2.5D look, compact rack
-banks, a five-slot carry tray, and honest hidden mistakes: any tape physically fits any slot
-with room, correctness is only revealed by explicit verification or late-game skills.
+### B1 — Extraction size bug (§1)
 
-## v2 requirements (user stories)
+Reproduced sequence: loose tape → insert → pull out → drop next to an untouched tape. The
+pulled tape rests visibly larger (screenshot evidence: oversized pink tape). Root cause:
+`animateInsert` beat 2 tweens `view.face` with `scaleX:{from:1…}` on a 208×144 texture whose
+working scale is 0.5 (display 104×72), snapping it to double size; `setScale(1)` then locks it.
+Fix requirements: canonical world size per pose (loose face, seated spine, turn), explicit
+origin/hit-area restore on extraction, kill stale tweens on transitions, never derive a pose
+from the previous sprite's current scale, pickup flourish never persists after release.
+Verified: 3 consecutive insert/remove cycles, extraction from a different rack, same sequence
+at 2+ zooms, grabbed point stays under the pointer.
 
-### A1 — Art direction and rack geometry
+### B2 — North bank centering (§2)
 
-- Fixed, gentle three-quarter mostly top-down 2.5D (per reference image): axis-aligned
-  objects (no steep diamond grid, no free 3D camera), top face dominant, thin darker extruded
-  front/side faces, top-left rim highlights, soft short contact shadows. Same angle for
-  table, racks, loose cassettes, props. HUD and text stay upright.
-- Logical board/slot positions stay independent of rendering: ground position = logical
-  (x,y) 1:1; the 2.5D is baked into angled art and layered sprites (rack bodies, seated
-  spines, slot lips as foreground). No canvas/HUD skew. Depth order = base y (painter).
-- Loose tapes show broad faces; stored tapes sit snugly edge-on like books: narrow colored
-  spine with symbol visible, seated behind a slot lip. Compact rack banks with labeled rows
-  and clearly readable empty slots. No full faces flat inside storage; no tiny racks
-  scattered across a mostly empty table.
+North bank (8 units, 2×4) sits at x 420..1500 of a 2800-wide world — visibly northwest with a
+large empty right flank. Fix: center the WHOLE bank (bounds incl. rack widths and gaps:
+span = 3·280 + 240 = 1080 → x0 = 860, span 860..1940, centered at 1400) between the side
+banks; camera start unchanged (no disguising); flanks get scatter zones (usable aisles);
+loose tapes stay across the middle. Verified by fit-to-table screenshot with all three banks
+visible.
 
-### A2 — Explorable board, ≥400 real tapes
+### B3 — 2.5D art + lighting pilot in one playable corner (§3)
 
-- Default board ≥ 400 actual interactive cassettes (target ~440–470). Table world pannable on
-  both axes (bigger than viewport). Loose tapes scattered through ALL usable regions —
-  center first, plus corridors between/beside racks — mixed singles and small clusters with
-  light overlap. Clearance kept around rack openings and the repair bench. No corner-only
-  dumping, no empty middle.
-- 8 shell colors × 4 clear symbols = 32 groups (no 8-shape variants). TWO matching rows per
-  group (8 slots each, in two different rack units in different banks) — either row equally
-  valid for every tape of the group; no hidden per-tape assignment. Tape count per group is
-  derived from the combined capacity of its rows (fill fraction, then top-up to ≥ 400).
-- Seedable generator; validate every seed: all tapes grabbable and correctly fileable
-  (demand ≤ capacity), counts balance, center stays populated across seeds, no
-  inaccessible starts (bounds/rack/bench/coverage). Rotation jitter keeps color+symbol
-  readable. Existing v1 saves are not silently migrated: layout version bumped; if a v1
-  save exists the player chooses "new layout (keep unlocked skills)" vs discard.
+Use the uploaded pack: teal-star `loose/turn/spine` atlas frames, one walnut cabinet + its 4
+foreground lip frames, walnut tile + rim, brass lamp + glow/shadow layers. Cabinet body
+behind tapes, correct lip in front (tape slides behind wood). Keep the gentle slide, motion
+strokes, Magnetic Tuck. Pose display sizes stored per-pose (not uniform scaling). Extraction
+restores loose pose (ties into B1). Fallback art for all other colors/symbols. Scene lighting:
+one soft warm direction, quieter ambient fill, subtle same-facing highlights, darker contact
+areas (under tapes/cabinets, overlaps, shelf recesses), restrained world-space falloff around
+the lamp, no ray tracing / global orange tint / screen-fixed overlay; HUD outside lighting;
+light/shadow pan+zoom with the world. Playable corner inside the current game (chosen: right
+bank teal cabinet unit 12 as the walnut, brass lamp upper-left of it, teal-star tapes nearby);
+rest of the board intact pending approval. Same-zoom before/after deliverable.
 
-### A3 — Camera, precise dragging, carry tray
+### B4 — Automatic milestones (§4)
 
-- Smooth bounded wheel zoom centered on the cursor (clamped by board edges), plus visible
-  +, − and fit-to-table buttons; zoom range tunable (0.6–2.0). Pan via Space+drag,
-  right/middle-drag, WASD/arrows — all usable while carrying tapes; touch keeps one-finger
-  pan on empty table + two-finger pinch zoom/pan; explicit Select mode for touch marquee.
-  HUD fixed. Pan/zoom/move/select gestures stay distinct.
-- Pickup keeps the grabbed point exactly under the cursor (grab offset recomputed from the
-  active camera every frame; works through pan and zoom, edge and center grabs, after
-  resize). One coordinate model (logical ground = camera world) for selection, rack drop
-  zones, marquee and tray drops.
-- Five-slot carry tray as basic equipment (visible, collapsible): load/remove tapes
-  individually, carry across the map, drag one out or drop the batch into a rack. Tapes in
-  the tray stay identifiable (color + symbol). Partial rack → insert only what fits, keep
-  the rest in the tray. A full tray never accepts a sixth (gentle refuse + hint). Carried
-  or stored tapes can always go back onto a free table spot.
+- Row complete (one symbol row full of correct color+symbol) → Tiny Chime + brief warm pulse,
+  automatic after the completing tape finishes seating. Full-but-misfiled row: nothing.
+- Cabinet complete (4 correct rows of one physical unit) → visible achievement banner
+  ("Teal Storage Complete") + fuller cozy sound. Same-tape-completes-both → cabinet sound
+  only (no layering). Recorded permanently (reload / re-verify / remove-reinsert never
+  re-grants). Magnetic Tuck unchanged on every accepted insertion. Audio optional; visible
+  feedback when muted.
 
-### A4 — Hidden mistakes and skill progression
+### B5 — Input scheme (§5)
 
-- Any tape physically enters any rack row with room, even wrong color/symbol: identical
-  snap preview, motion and sound for every accepted placement — no red flash, rejection,
-  special sound, tooltip or correctness-based counter during normal sorting. Rack counts
-  show physical occupancy only. Win validation checks actual group matches: fully occupied
-  but misfiled board is NOT a win. When the last loose tape is filed but misfiles remain, a
-  general message appears (no location revealed). Tapes can be pulled back out and re-filed.
-- Progression kept: marquee pickup unlocks by achievement; LMB on empty table draws a
-  desktop-style rectangle; release selects; selected tapes move as a group or load into free
-  tray slots (extras stay put, fit is shown). Tray itself is available from the start.
-- Skills, separate effects: spot damaged tapes; reveal misfiled tapes; show compatible racks
-  for the selected tape (both matching rows, incl. duplicates) with offscreen pointers;
-  highlight other tapes with same color+symbol. Last skill: one-click pickup of matching
-  loose tapes into free tray slots only (no teleporting past capacity). The powerful
-  late-game skills are temporary: tunable 15 s active / 60 s cooldown, remaining time and
-  cooldown shown; expiry never drops held tapes; no skill reveals mistakes before
-  activation.
+Left = interaction + pan; right = selection. Left-drag on empty table pans (no Space/mode
+toggle; Space+drag and wheel zoom and touch controls preserved). Movement threshold separates
+click from drag. Double-left-click a tape loads that ONE tape into the first empty tray slot
+(basic, pre-skill, works for loose and removable shelved tapes; tray full → tape stays exactly
+where it was + discreet "Tray full"; never moves a selection, never fires twice, never
+triggers a skill; different-tape clicks, drags, UI-control clicks don't count). The previous
+double-click binding (defective-tape repair-open in v2) is rebinded to unused key `R`
+(Match Gather stays on `G`, already key-bound in v2; keys shown in Skills panel + Help,
+clickable activation kept; no key-repeat, no trigger while typing). After Marquee Pickup
+unlocks, right-button drag on the tabletop draws the selection rectangle (does not pan);
+before unlock right-drag does not create a selection (v2 right-drag pan retained);
+context menu suppressed for the game canvas only.
 
-### A5 — Insertion is the most satisfying moment
+### B6 — Skills panel (§6)
 
-- No teleport: align over the selected opening, turn broad-face → edge-on, slide a short
-  visible distance in; slot lip as foreground layer conceals the leading part; spine visible
-  once seated. ~200–300 ms per tape (tunable), batch entries staggered slightly.
-- Two short, quiet curved motion strokes behind the tape during the slide (light comic cue,
-  not arrows/burst/bubble), fading before settle; at most one pair at a time during batches.
-- Magnetic Tuck on every accepted insertion: soft descending shff then a short muted plastic
-  tuk exactly at seat; calm, slightly game-like; subtle variation; overlapping peaks
-  controlled on a batch of five. Audition control (single / batch / chime) in the HUD.
-- Tiny Chime ONLY for explicit confirmations: a rack the player intentionally verifies, or
-  a verified end-of-job milestone. Never on correct insertion, filled rack, power
-  activation or repair finish.
+Single fixed Skills icon; compact panel with unlock/locked + requirements + active/cooldown
+states; close on second click, click outside, or Escape; hiding never stops an active power;
+panel controls never pan the table or select tapes beneath; tray separate; the always-visible
+bottom strip of skill chips is removed.
 
-### A6 — Repairs stay short and tactile (refined in place)
+### B7 — Repair return (§7)
 
-- Mechanism: open the shell, one or two simple actions (circular pencil winding of the
-  loose ribbon onto the reel) — no simulator complexity.
-- Sticker: peel off and discard the old symbol sticker, wipe the adhesive, press a new
-  same-symbol sticker — one short peel–wipe–press sequence; the old sticker is truly
-  discarded, never recolored.
-- Marker touch-up: separate and optional (cosmetic scuff on the shell, visible before/after;
-  does not block sorting).
+On repair completion: show the repaired cassette briefly, then animate THE SAME tape from the
+repair view to a clearly visible destination (default: marked return spot beside the repair
+bench), ~0.6–0.8 s eased travel + settle, camera shows the destination, lands normal-sized
+and immediately draggable, no duplication, never saved mid-flight.
 
-## Non-goals (unchanged from v1)
+### B8 — Pencil rewind rework (§8)
 
-No backend, no multiplayer, no physics placement, no fail state, no audio files, no
-external art assets.
+Separate insert / wind / remove. Insert: drag pencil into the hub → clean snap; stays anchored
+until deliberate removal; release/pointer-away/hold must not pull it out; inserting does not
+wind. Wind: press-hold on seated pencil or hub and move the pointer around the hub — accept
+ovals/triangles/sharp corners (angular travel around the hub, wrap-safe, not ring-shape or
+fixed-radius); ignore center jitter, stationary holds, short back-and-forth scrubbing; stop on
+release and resume later; quiet sound follows actual winding. Remove: double-click the seated
+pencil to grab it, then drag outside the hub; double-click alone never ejects; single-click
+hold stays "wind". Gesture local to the repair view. Ribbon fully rewound → ready state, pencil
+stays until removed; only then the B7 return starts.
+
+### B9 — Hover nudge (§9, pilot corner only)
+
+Moving unpressed cursor brushing a loose tape's edge → topmost eligible tape gets ~1° tilt +
+1–2 px visual offset, easing back over 150–220 ms. Display-only (face child sprite): world
+position, hitbox, sorting, save untouched. No retrigger when parked / boundary jitter /
+same-tape movement (short retrigger guard). Disabled while any button is down, holding or
+dragging, panning, selecting, over HUD/repair; not on shelved/carried tapes; no touch synth;
+cancel+reset instantly on pickup or input-mode takeover; reduced-motion respected; off/on
+comparison toggle (dev cluster). Spatially local (grid hash around the cursor, not 432 tapes
+per frame). Board looks still when nothing brushes it.
+
+## Non-goals
+
+No rebuild of the game; no engine/backend change; no full-board reskin (awaiting pilot
+approval); no nudge rollout beyond the pilot corner; no ray-traced/dynamic lighting.
 
 ## Constraints
 
-- Phaser 3.90.0 (pinned, installed) inside the existing Next.js 16 host; client-only canvas.
-- Keyboard, mouse and simulated touch all work; acceptance via unit tests + in-page
-  autotest + agent-browser E2E with screenshots.
-- Design knobs (group fill, zoom bounds, power timings, insertion duration) live in
-  `src/game/config.ts`.
+- Phaser 3.90.0 pinned; Next.js 16 host; save compatibility with v2 runs (seed regen + state
+  reapply + overlap fixup for moved racks); all art from the uploaded ZIP only.
+- Checkpoint pushes: `v3-planning` (docs) → `v3-fixes` (B1–B8 green) → `tidy-tapes` (pilot
+  B3+B9 + deliverables).

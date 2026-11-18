@@ -1,68 +1,60 @@
-# Tidy Tapes — Review note (analyze step, manual) — v2 follow-up
+# Tidy Tapes — Review note (analyze step, manual) — v3
 
 **Feature:** 001-tidy-tapes · Reviewer: build agent · Date: 2026-11-18 (UTC+8)
 
 ## Process honesty
 
-- Spec Kit CLI (`specify`) remains **not installed**; v2 spec/plan/tasks + this review are
-  manual (same as v1). No slash command ran; none claimed.
-- Reference skills: Spec Kit workflow applied manually; Ponytail applied to the v2 design
-  (see below); a visual pass runs against the attached reference image via the VLM skill;
-  regression pass uses agent-browser (installed). The sandbox skills `pdf`/`docx`/`charts`
-  etc. are irrelevant here; the fullstack-dev skill's agent-browser self-verification rule
-  is followed.
-- Reference image analyzed (VLM): axis-aligned cozy top-down, thin extruded front edges,
-  rim highlights, contact shadows, multi-row slotted trays, edge-on book-style spines,
-  icon-labeled rows, high clutter. v1 baseline screenshot confirmed the reported problems
-  (flat, tiny spread racks, empty middle).
+- Spec Kit CLI still not installed (as in v1/v2); v3 spec/plan/tasks + this review are manual.
+- Art pack extracted and README.md + scene-layout.json read in full before planning. The
+  reference mockups are visual targets only (never loaded as textures).
+- The v2 "20/20" result is treated as a baseline, not proof: every v3 case is reproduced on
+  the current build first (e.g. the oversized-after-unshelving tape confirmed by code reading:
+  the insert tween's `scaleX:{from:1}` on a 208×144 face texture working at 0.5 scale).
 
 ## Ponytail check — smallest working change per requirement
 
-- **No global projection matrix.** The reference is axis-aligned; baking the 2.5D into
-  sprites (extrusions, lips, shadows) achieves the look with zero coordinate-transform
-  risk and keeps v1's proven camera/drag math (identity ground mapping). The spec's "if a
-  shallow projection helps" clause is satisfied by choosing the identity + baked art path.
-- Rework, not rewrite: worldgen/validation/textures are regenerated (geometry genuinely
-  changed), but scenes/controllers/save/audio/repair keep their v1 structure and proven
-  event flows; no engine/backend/asset changes; no new dependencies.
+- B1 solved by a pose module + tween math fix, not a rearchitecture of drag/drop.
+- B2 is one constant (all geometry derives from `unitPos`), not a camera trick.
+- B3/B9 confined to one corner with a reversible toggle; no engine or map replacement.
+- B4 is an edge-triggered checker hooked at the existing insert-complete beat.
+- B5 keeps the v2 pointer pipeline and adds threshold arming + a click-deferral window.
+- B6–B8 are localized to UIScene / GameScene.onRepairClosed / RepairScene.rewind.
 
-## Conflicting-input resolution (cross-checked spec ↔ plan ↔ tasks)
+## Conflicting-input resolution (spec ↔ playtest doc ↔ v2 behavior)
 
-1. **Wheel: v1 pans, v2 zooms.** Zoom wins (explicit v2 instruction); pan remains via
-   Space+drag, right/middle-drag, WASD, touch. Help text updated so no verb is lost.
-2. **"Matching rows" ambiguity** → resolved as: row = one labeled 8-slot row; each group's
-   two rows live in two different rack units in different banks; validity is row-label
-   equality (no per-tape assignment). Win, Slot Guide (both rows), and generator all use
-   the same rule. The "two identical racks" phrase maps to these two rows.
-3. **Hidden correctness vs defect refusal.** Misfiles must be silent; defective rewind/
-   sticker tapes still refuse with the damage hint (visible defect state, not a correctness
-   leak — the tape's own damage is public information). Paint defect becomes optional/
-   cosmetic so nothing blocks filing invisibly.
-4. **Chime policy conflicts in v1** (chime fired on power activation and repair finish) →
-   retargeted: power activation → no sound, repair finish → soft press blip, chime reserved
-   for verify + win only.
-5. **Tray vs Marquee cap.** Marquee group carry (v1, cap 5) and tray (5 slots) coexist:
-   marquee selection can be dropped onto the tray (loads what fits) or carried as a bundle;
-   tray batch drop inserts only what fits. A full tray never accepts more — single rule in
-   both DragController and tray code.
-6. **Win on "fully occupied"** — win requires zero loose tapes AND every seated tape's
-   group matching its row label; physical capacity is guaranteed (total ≤ 32×16 slots);
-   misfiles are always correctable by pull-out, so the board is always solvable.
-7. **Save migration** — v1 save is never silently migrated (combo model changed 64→32);
-   the player chooses "fresh bench, keep unlocked skills" or discard. Progress (skill
-   unlocks) is stored separately from layout state, satisfying "separate the new-layout
-   option from the player's old progress".
-8. **Coordinate drift** — one coordinate model only: logical ground = camera world space
-   (identity); all hit-testing (tapes, rows, tray-in-screen-space, marquee) converts
-   through `camera.getWorldPoint` and the tray's screen rect; grab-point rule unchanged
-   from v1 (proven by autotest through pan/zoom/resize).
-9. **Camera zoom-at-cursor with clamp** — implemented as zoom then scroll-correction so the
-   cursor world point stays fixed, then Phaser bounds clamp (edges win over cursor, per
-   "when not limited by the board edge").
+1. **Right-drag semantics.** v2 pans with right-drag; v3 §5 makes right-drag the marquee after
+   unlock and says "it does not pan". Resolution: after unlock → marquee only; before unlock →
+   right-drag pans (v2 control preserved, no selection possible, satisfying "must not create a
+   selection").
+2. **The "skill that currently uses double-click".** In v2 no *skill* is double-click-bound;
+   the double-click gesture is the defective-tape repair opener. It is the affected binding:
+   rebinded to `R` (unused; G already = Match Gather as the doc prefers), old binding removed,
+   Help/panel updated, bench drag-in kept as the second repair route.
+3. **Double-click vs power clicks.** A tape click while Match Gather is armed must not be
+   swallowed by the tray shortcut and vice versa. Resolution: single-click actions are
+   deferred ~240 ms; the second click of a double-click cancels them, so a double-click never
+   triggers a skill, and skills still fire on deliberate single clicks.
+4. **Milestone chime vs verify-only chime (v2).** The doc explicitly changes the rule at the
+   milestone level: Tiny Chime now also fires automatically on correct row/cabinet completion;
+   individual right/wrong insertion stays silent. Misfiled-full rows stay silent by design.
+5. **Walnut cabinet vs map preservation.** One side-bank unit is respaced to host the taller
+   walnut cabinet (logical row ids/capacities/groups unchanged; row 48 = teal star row either
+   way; saves keep working via the overlap fixup). This is the minimal honest integration of
+   "one playable corner" — the alternative (squeezing the 835×1252 art into 240×184) would
+   distort the art, which the README forbids.
+6. **Table surface.** Full-board walnut reskin would violate "keep the rest of the board
+   intact"; a bounded walnut inlay patch around the pilot corner uses the pack's surface/trim
+   without reskinning the table.
+7. **Seated spine sizes differ between cabinets** (fallback 16×28 vs walnut-row seat geometry)
+   — accepted per §1's "separate visual size for a seated spine" and README's "store each
+   pose's intended display dimensions explicitly".
+8. **Row/cabinet milestone + hidden correctness.** The pulse/chime only confirms fully-correct
+   rows, which is a deliberate leak at milestone granularity requested by the doc; individual
+   placements remain feedback-identical.
 
 ## Verification plan reminder
 
-Unit sweep + in-page autotest + agent-browser E2E with screenshots must actually run;
-failures fixed and retested. Honest final report: simulated vs real-device checks
-separated; audio verified by parameters (headless cannot hear); VLM screenshot inspection
-is advisory.
+Every fix reproduced → implemented → re-tested through real input paths (synthetic DOM events
+through Phaser + agent-browser E2E on the dev server); audio asserts are event-level (headless
+cannot hear); screenshots re-inspected visually; honest final report separates tested /
+asserted / not-tested.
