@@ -1,16 +1,14 @@
 /**
- * Tidy Tapes — runtime art-pilot state (v3 §3).
+ * Tidy Tapes — runtime art-family state (v4).
  *
- * The walnut cabinet's GEOMETRY (unit rect, slot centers, row rects) is fixed
- * regardless of this state; this toggle only decides whether the pilot corner
- * renders with the uploaded pack art or the procedural fallback look, so the
- * same-zoom before/after comparison never perturbs the board or the saves.
- * Persisted through save settings (`pilotArt`).
+ * `pilotArt` (settings key kept for save compatibility) now selects the
+ * FULL-BOARD art family: true = the v4 cassette/cabinet/background template
+ * everywhere; false = the pre-rollout procedural look, still baked under
+ * `legacy-*` keys so the before/after comparator never perturbs the board.
+ * Geometry is identical in both modes.
  */
-import { ART_PILOT } from './config';
-
 class ArtState {
-  pilotArt: boolean = ART_PILOT.enabled;
+  pilotArt: boolean = true;
 }
 
 export const artState = new ArtState();

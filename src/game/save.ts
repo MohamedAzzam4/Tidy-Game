@@ -2,13 +2,13 @@
  * Tidy Tapes — save/load v3. localStorage is untrusted input: every field is guarded.
  * Pure functions + a tiny storage adapter (browser-only guard).
  *
- * v3 layout (north bank centered, walnut pilot unit respaced) accepts v2 runs:
+ * v3 layout (north bank centered, right bank respaced) accepts v2 runs:
  * the seed is the source of structure, mutable state is reapplied, and any loose
  * tape that now sits inside a moved rack/bench/lamp rect is pushed to the
  * nearest legal spot (overlap fixup) — never silently dropped.
  */
 import {
-  ART_PILOT, GROUPS, ROWS, SAVE_KEY, SAVE_KEY_V2, SLOTS_PER_ROW, TRAY_SLOTS,
+  TABLE_LIGHT, GROUPS, ROWS, SAVE_KEY, SAVE_KEY_V2, SLOTS_PER_ROW, TRAY_SLOTS,
   UNITS, WORLD_H, WORLD_W, benchRect, unitRect,
 } from './config';
 import type { DefectType, SaveFile, SaveSettings, Tape, WorldData } from './types';
@@ -242,8 +242,8 @@ export function loadRun(): SaveFile | null {
 }
 
 /**
- * v3 layout fixup: push any LOOSE tape that now overlaps a rack (the centered
- * north bank or the taller walnut pilot), the bench, or the pilot lamp out to
+ * v4 layout fixup: push any LOOSE tape that now overlaps a rack (the centered
+ * north bank or the reverted right bank), the bench, or the table lamp out to
  * the nearest legal spot. Shelved/tray tapes are position-independent. Idempotent.
  */
 export function resolveSaveOverlaps(world: WorldData): number {
@@ -251,8 +251,8 @@ export function resolveSaveOverlaps(world: WorldData): number {
   for (let u = 0; u < UNITS; u++) obstacles.push(unitRect(u));
   obstacles.push(benchRect());
   obstacles.push({
-    x: ART_PILOT.lamp.x - 16, y: ART_PILOT.lamp.y - 16,
-    w: ART_PILOT.lamp.w + 32, h: ART_PILOT.lamp.h + 32,
+    x: TABLE_LIGHT.lamp.x - 16, y: TABLE_LIGHT.lamp.y - 16,
+    w: TABLE_LIGHT.lamp.w + 32, h: TABLE_LIGHT.lamp.h + 32,
   });
   const pad = 34;
   const clamp = (p: { x: number; y: number }) => ({

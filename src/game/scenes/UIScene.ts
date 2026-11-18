@@ -5,7 +5,7 @@
  * v2 always-visible chip strip is gone), help, zoom +/−/fit, New Game, touch
  * mode. Bottom-right: the five-slot CARRY TRAY (basic equipment) with a flash
  * when a tape lands in a slot. Bottom-left: a small dev cluster for the v3
- * pilot comparisons (hover fx / pilot art / sound toggles). Cabinet completions
+ * art comparisons (hover fx / new art / sound toggles). Cabinet completions
  * raise a banner. HUD and text stay upright always and sit OUTSIDE the game
  * scene's lighting layers.
  */
@@ -210,8 +210,8 @@ export class UIScene extends Phaser.Scene {
       : 'Pan mode: drag empty table to pan; two fingers anywhere pinch-zoom and pan');
   }
 
-  // ------------------------------------------------------ dev cluster (v3 pilot)
-  /** bottom-left mini toggles: hover fx / pilot art / sound — the §9/§3 comparators */
+  // ------------------------------------------------------ dev cluster (comparators)
+  /** bottom-left mini toggles: hover fx / new art / sound — the §9/§3 comparators */
   private buildDevCluster(): void {
     const mk = (label: string, key: keyof SaveSettings, x: number, cb: () => void) => {
       const t = this.add.text(x, this.H - 32, label, {
@@ -228,13 +228,13 @@ export class UIScene extends Phaser.Scene {
       if (!g) return;
       g.applySettings({ hoverFx: !g.settings.hoverFx });
     });
-    mk('pilot art: on', 'pilotArt', 118, () => {
+    mk('new art: on', 'pilotArt', 118, () => {
       const g = game();
       if (!g) return;
       g.applySettings({ pilotArt: !g.settings.pilotArt });
       this.showToast(g.settings.pilotArt
-        ? 'Art pilot on — walnut cabinet + teal-star tapes + lighting'
-        : 'Art pilot off — procedural fallback look (before mode)');
+        ? 'New art on — full-board cassette/cabinet template + board-wide lighting'
+        : 'New art off — pre-rollout look (before mode)');
     });
     mk('sound: on', 'sound', 222, () => {
       const g = game();
@@ -248,7 +248,7 @@ export class UIScene extends Phaser.Scene {
     const hov = this.devToggles.hoverFx as Phaser.GameObjects.Text | undefined;
     if (hov) hov.setText(`hover fx: ${s.hoverFx ? 'on' : 'off'}`);
     const art = this.devToggles.pilotArt as Phaser.GameObjects.Text | undefined;
-    if (art) art.setText(`pilot art: ${s.pilotArt ? 'on' : 'off'}`);
+    if (art) art.setText(`new art: ${s.pilotArt ? 'on' : 'off'}`);
     const snd = this.devToggles.sound as Phaser.GameObjects.Text | undefined;
     if (snd) snd.setText(`sound: ${s.sound ? 'on' : 'off'}`);
   }
@@ -687,8 +687,9 @@ export class UIScene extends Phaser.Scene {
       '  · D defect scanner · M misfile finder · S match scan · G match gather · F fit',
       '  · Skills (top right) — every skill, its key, unlock state and cooldowns',
       '',
-      'Pilot corner (top right of the bench): walnut cabinet, teal-star art and the',
-      'lamp lighting. Compare with the bottom-left toggles (pilot art / hover fx).',
+      'Whole-board art: one cassette template in every pose and color, matching',
+      'cabinets everywhere, board-wide lighting. Compare with the bottom-left',
+      'toggles (new art / hover fx).',
     ];
     const game = this.gameScene();
     if (game) lines.push(`Seed: ${game.seed} — replay any run with ?seed=${game.seed}`);

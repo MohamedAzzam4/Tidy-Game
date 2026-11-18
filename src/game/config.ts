@@ -57,89 +57,27 @@ export const SPINE_H = 28;
 // units 0..7  : north bank (2 rows of 4), WHOLE-BANK CENTERED (v3 §2):
 //               span = 3*BACK.dx + UNIT_W = 1080, x0 = (WORLD_W-1080)/2 = 860
 // units 8..11 : left bank  (1 column of 4)
-// units 12..15: right bank — unit 12 is the walnut art-pilot cabinet (v3 §3)
+// units 12..15: right bank (1 column of 4) — v4: uniform compact spacing again
 const BACK = { x0: 860, y0: 140, dx: 280, dy: 220 };
 const SIDE = { xL: 140, xR: 2400, y0: 620, dy: 220 };
-/** right-bank tops: walnut (tall) + three respaced fallback units */
-const RIGHT_TOPS = [560, 1064, 1294, 1524];
 
-// ------------------------------------------------------------------ art pilot
+// ------------------------------------------------------------------ lighting
 /**
- * v3 §3 — one-corner graphics + lighting pilot. Unit 12 (teal cabinet B in the
- * right bank) renders with the uploaded walnut cabinet art; teal-star tapes
- * (combo 16) use the uploaded cassette atlas poses. Everything else keeps the
- * procedural fallback art. All numbers derive from the pack's scene-layout.json
- * (art px) mapped through CAB_SCALE.
+ * v4 full-board lighting + props. The v3 pilot corner is gone: one compact
+ * cabinet family everywhere, one lighting environment for the whole table.
+ * The lamp rect stays — worldgen and save-overlap logic treat it as an
+ * obstacle (tapes never spawn under the lamp).
  */
-export const ART_PILOT = {
-  enabled: true,                    // runtime toggle for before/after comparison
-  unit: 12,
-  combo: 4 * 4 + 0,                  // teal star = colorIdx 4 × 4 symbols + star
-  topleft: { x: 2400, y: 560 },
-  cabScale: 0.378,                   // 835×1252 art → 316×473.7 world
-  /** cabinet body art size (scene-layout source_width/height) */
-  art: { w: 835, h: 1252 },
-  /** usable slot-center x span in art px (scene-layout) */
-  slotSpan: [110, 690] as [number, number],
-  /** seat y per row in art px (scene-layout rows[].seat_y) */
-  seats: [361, 627, 897, 1161],
-  /** foreground lip overlay top-left per row in art px */
-  lips: [[62, 356], [62, 622], [62, 892], [62, 1156]] as [number, number][],
-  /** cassette anchors from scene-layout (normalized per frame) */
-  anchors: {
-    loose: [0.5, 0.51] as [number, number],
-    turn: [0.226, 0.868] as [number, number],
-    spine: [0.5, 0.973] as [number, number],
-  },
-  /** cassette pose display sizes in world px (tuned; loose = existing footprint) */
-  poses: {
-    loose: { w: 104, h: 71.9 },
-    turn: { w: 42.9, h: 87.2 },
-    spine: { w: 20.6, h: 85 },
-  },
-  /** seated fallback spines inside the walnut read taller (compartment scale) */
-  fallbackSpineInPilot: { w: 16, h: 56 },
-  /** brass lamp, upper-left of the test corner */
+export const TABLE_LIGHT = {
+  /** brass lamp prop, upper-right of the table (also a worldgen obstacle) */
   lamp: { x: 2245, y: 430, w: 150, h: 180 },
-  /** scene-layout lighting starting values */
+  /** scene lighting values (world-space layers, HUD excluded) */
   light: {
-    ambient: 0x32221e, ambientAlpha: 0.12,
-    lampPoolAlpha: 0.36, bulbHaloAlpha: 0.28, contactShadowAlpha: 0.5,
-    falloffAlpha: 0.1, cornerVignetteAlpha: 0.1,
+    ambient: 0x32221e, ambientAlpha: 0.1,
+    lampPoolAlpha: 0.3, bulbHaloAlpha: 0.22,
+    falloffAlpha: 0.13, cornerVignetteAlpha: 0.12,
   },
-  /** walnut surface inlay wing (right wing of the bench) + rim trim */
-  inlay: { x0: 2200, y0: 0, x1: WORLD_W, y1: 1750 },
-  /** pilot corner bounds: hover-nudge eligibility + before/after shot area */
-  region: { x0: 1950, y0: 100, x1: WORLD_W - 10, y1: 1150 },
 } as const;
-
-export function isPilotUnit(u: number): boolean {
-  // geometry is ALWAYS the walnut footprint (row ids/capacities unchanged) —
-  // the runtime art toggle only swaps textures, never the slot math
-  return u === ART_PILOT.unit;
-}
-
-/** world size of the walnut cabinet */
-export function pilotUnitRect(): { x: number; y: number; w: number; h: number } {
-  return {
-    x: ART_PILOT.topleft.x, y: ART_PILOT.topleft.y,
-    w: ART_PILOT.art.w * ART_PILOT.cabScale, h: ART_PILOT.art.h * ART_PILOT.cabScale,
-  };
-}
-
-/** art px → world px inside the walnut cabinet */
-function cabWorld(artX: number, artY: number): { x: number; y: number } {
-  return {
-    x: ART_PILOT.topleft.x + artX * ART_PILOT.cabScale,
-    y: ART_PILOT.topleft.y + artY * ART_PILOT.cabScale,
-  };
-}
-
-/** slot center in art px (8 centers across the usable span) */
-function pilotSlotArtX(k: number): number {
-  const [a, b] = ART_PILOT.slotSpan;
-  return a + (k * (b - a)) / (SLOTS_PER_ROW - 1);
-}
 
 export function unitPos(u: number): { x: number; y: number } {
   if (u < 8) {
@@ -147,12 +85,10 @@ export function unitPos(u: number): { x: number; y: number } {
     const bankRow = Math.floor(u / 4);
     return { x: BACK.x0 + col * BACK.dx, y: BACK.y0 + bankRow * BACK.dy };
   }
-  if (u < 12) {
-    return { x: SIDE.xL, y: SIDE.y0 + (u - 8) * SIDE.dy };
-  }
-  // right bank: unit 12 hosts the walnut pilot; 13..15 respaced below it
-  const i = u - 12;
-  return { x: SIDE.xR, y: RIGHT_TOPS[i] };
+  // both side banks share the same compact rhythm (v4: the v3 pilot respace
+  // is reverted — unit 12 is a standard cabinet again)
+  const side = u < 12 ? SIDE.xL : SIDE.xR;
+  return { x: side, y: SIDE.y0 + (u % 4) * SIDE.dy };
 }
 
 /** rowId (0..63) → owning unit. Rows 4u..4u+3 belong to unit u. */
@@ -172,35 +108,19 @@ export function rowsOfGroup(g: number): number[] { return [g % ROWS, (g + GROUPS
 
 export function rowRect(row: number): { x: number; y: number; w: number; h: number } {
   const u = unitOfRow(row);
-  if (isPilotUnit(u)) {
-    const lr = row % ROWS_PER_UNIT;
-    const lip = ART_PILOT.lips[lr];
-    const seat = ART_PILOT.seats[lr];
-    const tl = cabWorld(lip[0], seat - 176);
-    return {
-      x: tl.x, y: tl.y,
-      w: 678 * ART_PILOT.cabScale, h: 214 * ART_PILOT.cabScale,
-    };
-  }
   const p = unitPos(u);
   const lr = row % ROWS_PER_UNIT;
   return { x: p.x + 6, y: p.y + ROW_CH_TOP + lr * ROW_PITCH - 4, w: UNIT_W - 12, h: ROW_CH_H + 8 };
 }
 
 export function unitRect(u: number): { x: number; y: number; w: number; h: number } {
-  if (isPilotUnit(u)) return pilotUnitRect();
   const p = unitPos(u);
   return { x: p.x, y: p.y, w: UNIT_W, h: UNIT_H };
 }
 
 /** World-space center of slot `k` (0..7) in row `row`. */
 export function slotPos(row: number, k: number): { x: number; y: number } {
-  const u = unitOfRow(row);
-  if (isPilotUnit(u)) {
-    const lr = row % ROWS_PER_UNIT;
-    return cabWorld(pilotSlotArtX(k), ART_PILOT.seats[lr]);
-  }
-  const p = unitPos(u);
+  const p = unitPos(unitOfRow(row));
   const lr = row % ROWS_PER_UNIT;
   return { x: p.x + SLOT0_X + k * SLOT_PITCH, y: p.y + rowLocalY(lr) };
 }

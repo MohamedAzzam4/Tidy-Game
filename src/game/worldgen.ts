@@ -10,7 +10,7 @@
  */
 import { Rng } from './rng';
 import {
-  ART_PILOT, CENTER, CENTER_MIN_TAPES, DEFECT_RATE, GROUPS, GROUP_CAPACITY,
+  TABLE_LIGHT, CENTER, CENTER_MIN_TAPES, DEFECT_RATE, GROUPS, GROUP_CAPACITY,
   GROUP_FILL_MAX, GROUP_FILL_MIN, ROWS, ROWS_PER_GROUP, SLOTS_PER_ROW, TOTAL_MIN,
   UNIT_H, UNIT_W, UNITS, WORLD_H, WORLD_W, groupOfRow, rowsOfGroup, unitRect, benchRect,
 } from './config';
@@ -179,9 +179,9 @@ export function generateWorld(seed: number): WorldData {
     placed.push({ x, y });
   }
 
-  // --- placement with obstacles (units + bench + pilot lamp) ---
+  // --- placement with obstacles (units + bench + table lamp) ---
   const MARGIN = 40; // > tape bounding radius (~32): clearance around rack openings
-  const lampRect = { x: ART_PILOT.lamp.x, y: ART_PILOT.lamp.y, w: ART_PILOT.lamp.w, h: ART_PILOT.lamp.h };
+  const lampRect = { x: TABLE_LIGHT.lamp.x, y: TABLE_LIGHT.lamp.y, w: TABLE_LIGHT.lamp.w, h: TABLE_LIGHT.lamp.h };
   const badPos = (x: number, y: number): boolean => {
     if (x < 70 || x > WORLD_W - 70 || y < 90 || y > WORLD_H - 70) return true;
     for (let u = 0; u < UNITS; u++) {

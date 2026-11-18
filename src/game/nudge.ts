@@ -1,20 +1,20 @@
 /**
- * Tidy Tapes — hover nudge (v3 §9), pilot corner only.
+ * Tidy Tapes — hover nudge (v3 §9, board-wide since v4).
  *
- * A MOVING, unpressed cursor brushing into the edge of a loose tape nudges the
- * topmost eligible tape once: ~1° tilt + a 1–2 px visual offset easing back over
- * ~150–220 ms. The effect animates the FACE CHILD only — the tape's world
+ * A MOVING, unpressed cursor brushing into the edge of ANY loose tape nudges
+ * the topmost eligible tape once: ~1° tilt + a 1–2 px visual offset easing back
+ * over ~150–220 ms. The effect animates the FACE CHILD only — the tape's world
  * position, hit area, depth (sorting) and save data are untouched. Retriggers
  * are guarded (parked cursor / boundary jitter / movement within the same tape
  * never buzz). Disabled for any pressed button, while holding/dragging/panning/
  * selecting, over HUD or the repair view, for shelved or carried tapes, and
  * never synthesized for touch. Reduced-motion disables it entirely.
  *
- * The candidate search is spatially local: a coarse grid hash of the pilot
- * region's loose tapes, only the cells around the cursor are examined.
+ * The candidate search is spatially local: a coarse grid hash of every loose
+ * tape on the board — only the cells around the cursor are examined.
  */
 import Phaser from 'phaser';
-import { ART_PILOT, NUDGE } from './config';
+import { NUDGE } from './config';
 import type { GameScene, TapeView } from './scenes/GameScene';
 import type { Tape } from './types';
 
@@ -63,11 +63,9 @@ export class HoverNudge {
   private rebuild(): void {
     this.hash.clear();
     const cell = NUDGE.cell;
-    const r = ART_PILOT.region;
     for (const view of this.scene.tapeViews.values()) {
       const t = this.scene.tapeData(view.id) as Tape | undefined;
       if (!t || t.state !== 'loose') continue;
-      if (t.x < r.x0 || t.x > r.x1 || t.y < r.y0 || t.y > r.y1) continue;
       const key = Math.floor(t.x / cell) * 8192 + Math.floor(t.y / cell);
       const list = this.hash.get(key) ?? [];
       list.push(view);
@@ -111,11 +109,6 @@ export class HoverNudge {
 
     const cam = this.scene.cameras.main;
     const wp = cam.getWorldPoint(pointer.x, pointer.y);
-    const r = ART_PILOT.region;
-    if (wp.x < r.x0 || wp.x > r.x1 || wp.y < r.y0 || wp.y > r.y1) {
-      this.lastHover = null;
-      return;
-    }
 
     // a MOVING cursor only: the pointer must have actually traveled
     let speed = Infinity;

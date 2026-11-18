@@ -9,7 +9,7 @@
  * entering tape is naturally occluded by the slot's south wall.
  */
 import Phaser from 'phaser';
-import { ART_PILOT, COLORS, SYMBOLS, ROW_CH_H, ROW_CH_TOP, ROW_PITCH, SLOT0_X, SLOT_PITCH } from './config';
+import { COLORS, SYMBOLS, ROW_CH_H, ROW_CH_TOP, ROW_PITCH, SLOT0_X, SLOT_PITCH } from './config';
 import { drawSymbol } from './symbols';
 
 function canvasTex(scene: Phaser.Scene, key: string, w: number, h: number): CanvasRenderingContext2D {
@@ -270,10 +270,10 @@ export function buildChip(scene: Phaser.Scene, combo: number): void {
  * Generic unit body (all units share it): wooden tray top face, label strip,
  * 4 dark slot channels with north walls and slot dividers, extruded front face
  * at the bottom. Seated spines are drawn ABOVE this, and the lip overlay above
- * them. 480x368 @2x -> 240x184 display.
+ * them. v4: pre-rollout look kept under legacy-*.
  */
 export function buildUnitBody(scene: Phaser.Scene): void {
-  const key = 'unit-body';
+  const key = 'legacy-unit-body';
   const W = 480, H = 368;
   const ctx = canvasTex(scene, key, W, H);
 
@@ -369,7 +369,7 @@ export function buildUnitBody(scene: Phaser.Scene): void {
  * edge is naturally concealed. Transparent everywhere else. 480x368 @2x.
  */
 export function buildUnitLips(scene: Phaser.Scene): void {
-  const key = 'unit-lips';
+  const key = 'legacy-unit-lips';
   const W = 480, H = 368;
   const ctx = canvasTex(scene, key, W, H);
   const chX0 = 82, chX1 = 452;
@@ -399,7 +399,7 @@ export function buildUnitLips(scene: Phaser.Scene): void {
 
 // ----------------------------------------------------------------------- wood
 export function buildWood(scene: Phaser.Scene): void {
-  const key = 'wood';
+  const key = 'legacy-wood';
   const S = 512;
   const ctx = canvasTex(scene, key, S, S);
   ctx.fillStyle = '#8a5a3b'; ctx.fillRect(0, 0, S, S);
@@ -680,60 +680,188 @@ export function buildSymbolStickers(scene: Phaser.Scene): void {
   }
 }
 
+// ------------------------------------------------------- v4 full-board bakes
 /**
- * "Before"-mode cabinet for the pilot footprint: plain warm wood with four
- * open compartments and shelf rails at the same art-px positions as the walnut
- * atlas, so the geometry (slots, seats, lips, hit areas) is identical between
- * the before/after comparison modes — only the textures differ.
+ * v4 tabletop surface: same plank structure as the legacy wood (setting
+ * continuity) but lower contrast and a warmer, quieter tone so tapes read
+ * against it everywhere. 512x512 tile.
  */
-export function buildPlainPilotCabinet(scene: Phaser.Scene): void {
-  const key = 'walnut-plain';
-  const k = ART_PILOT.cabScale;
-  const W = Math.round(ART_PILOT.art.w * k);
-  const H = Math.round(ART_PILOT.art.h * k);
+export function bakeWoodTable(scene: Phaser.Scene): void {
+  const key = 'wood';
+  const S = 512;
+  const ctx = canvasTex(scene, key, S, S);
+  ctx.fillStyle = '#916344';
+  ctx.fillRect(0, 0, S, S);
+  for (let plank = 0; plank < 4; plank++) {
+    const y0 = plank * 128;
+    const tone = -5 + Math.floor(h2(plank * 17) * 9);   // ±5 instead of ±10..18
+    ctx.fillStyle = shade('#916344', tone);
+    ctx.fillRect(0, y0 + 2, S, 124);
+    ctx.fillStyle = 'rgba(46,26,14,0.32)';               // soft seam
+    ctx.fillRect(0, y0, S, 2);
+    ctx.fillStyle = 'rgba(255,226,180,0.05)';
+    ctx.fillRect(0, y0 + 2, S, 2);
+    ctx.strokeStyle = 'rgba(52,30,16,0.10)';
+    ctx.lineWidth = 2;
+    for (let g = 0; g < 5; g++) {
+      const gy = y0 + 14 + h2(plank * 13 + g) * 100;
+      ctx.beginPath();
+      ctx.moveTo(0, gy);
+      ctx.bezierCurveTo(S * 0.33, gy + (h2(g * 3 + plank) - 0.5) * 8, S * 0.66, gy - (h2(g * 5 + plank) - 0.5) * 8, S, gy);
+      ctx.stroke();
+    }
+    if (h2(plank * 7 + 3) > 0.72) {
+      const kx = 40 + h2(plank * 29) * (S - 80);
+      const ky = y0 + 20 + h2(plank * 41) * 90;
+      ctx.beginPath(); ctx.arc(kx, ky, 6, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(52,30,16,0.22)'; ctx.fill();
+      ctx.beginPath(); ctx.arc(kx, ky, 2.5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(36,20,10,0.34)'; ctx.fill();
+    }
+  }
+  // gentle overall sheen so the surface reads lit under the ambient layer
+  const sheen = ctx.createLinearGradient(0, 0, 0, S);
+  sheen.addColorStop(0, 'rgba(255,232,196,0.05)');
+  sheen.addColorStop(1, 'rgba(60,34,18,0.06)');
+  ctx.fillStyle = sheen;
+  ctx.fillRect(0, 0, S, S);
+  finish(scene, key);
+}
+
+/**
+ * v4 cabinet body at the FIXED compact geometry (240x184 display, 480x368
+ * @2x): warm walnut tray, label strip, four recessed channels at the same
+ * constants as the legacy body (ROW_CH_TOP/PITCH/H, SLOT0_X/PITCH), extruded
+ * front face. Layered UNDER the seated spines.
+ */
+export function bakeCabinetBody(scene: Phaser.Scene): void {
+  const key = 'unit-body';
+  const W = 480, H = 368;
   const ctx = canvasTex(scene, key, W, H);
-  // outer frame
-  rr(ctx, 0, 0, W, H, 12);
-  ctx.fillStyle = '#6e4429'; ctx.fill();
-  ctx.lineWidth = 4; ctx.strokeStyle = '#4a2c1a'; ctx.stroke();
-  // subtle grain
-  ctx.strokeStyle = 'rgba(0,0,0,0.10)'; ctx.lineWidth = 1.6;
-  for (let g = 0; g < 10; g++) {
-    const gy = (g / 10) * H + h2(g * 13) * 12;
-    ctx.beginPath(); ctx.moveTo(6, gy);
-    ctx.bezierCurveTo(W * 0.33, gy + 3, W * 0.66, gy - 3, W - 6, gy);
+
+  // soft ground shadow under the cabinet
+  contactShadow(ctx, W / 2 + 9, H / 2 - 4, W / 2 - 16, H / 2 - 30);
+
+  // extruded front face (bottom band)
+  ctx.fillStyle = '#5d3a22';
+  rr(ctx, 10, H - 24, W - 20, 18, 6);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';
+  rr(ctx, 10, H - 12, W - 20, 6, 4);
+  ctx.fill();
+  // right side thickness hint
+  ctx.fillStyle = 'rgba(0,0,0,0.15)';
+  rr(ctx, W - 15, 12, 9, H - 30, 4);
+  ctx.fill();
+
+  // tray top face (walnut)
+  rr(ctx, 8, 8, W - 18, H - 34, 14);
+  ctx.fillStyle = '#7b4e2e';
+  ctx.fill();
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = '#54331d';
+  ctx.stroke();
+  // quiet grain
+  ctx.strokeStyle = 'rgba(0,0,0,0.08)';
+  ctx.lineWidth = 2;
+  for (let g = 0; g < 5; g++) {
+    const gy = 20 + g * 62 + h2(g * 11) * 8;
+    ctx.beginPath(); ctx.moveTo(16, gy);
+    ctx.bezierCurveTo(W * 0.3, gy + (h2(g + 2) - 0.5) * 5, W * 0.7, gy - (h2(g * 7) - 0.5) * 5, W - 16, gy);
     ctx.stroke();
   }
-  // top rim light
-  ctx.fillStyle = 'rgba(255,235,200,0.16)';
-  rr(ctx, 6, 4, W - 12, 6, 3); ctx.fill();
-  // four open compartments + shelf boards (art-px positions × cabScale)
+  // top rim light (consistent overhead key light)
+  ctx.strokeStyle = 'rgba(255,235,200,0.35)';
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(24, 17); ctx.lineTo(64, 12); ctx.stroke();
+
+  // label strip band (chips + counts + verify live here at runtime)
+  rr(ctx, 14, 12, W - 28, 44, 8);
+  ctx.fillStyle = '#6b4128';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.22)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  rr(ctx, 16, 14, W - 32, 8, 4); ctx.fill();
+  ctx.fillStyle = 'rgba(255,235,200,0.09)';
+  rr(ctx, 16, 42, W - 32, 10, 5); ctx.fill();
+
+  // 4 slot channels (identical geometry to the legacy body)
+  const chX0 = 82, chX1 = 452;
   for (let lr = 0; lr < 4; lr++) {
-    const top = Math.round((ART_PILOT.seats[lr] - 200) * k);
-    const bottom = Math.round((ART_PILOT.seats[lr] + 44) * k);
-    const left = Math.round(ART_PILOT.lips[lr][0] * k);
-    const right = Math.round((ART_PILOT.lips[lr][0] + 678) * k);
-    rr(ctx, left, top, right - left, bottom - top, 6);
-    ctx.fillStyle = '#241610'; ctx.fill();
-    const grad = ctx.createLinearGradient(0, top, 0, bottom);
-    grad.addColorStop(0, 'rgba(0,0,0,0.45)');
-    grad.addColorStop(1, 'rgba(0,0,0,0.05)');
-    ctx.fillStyle = grad;
-    rr(ctx, left, top, right - left, bottom - top, 6);
+    const top = (ROW_CH_TOP + lr * ROW_PITCH) * 2;
+    const h = ROW_CH_H * 2;
+    rr(ctx, chX0 - 4, top + 6, chX1 - chX0 + 8, h - 8, 5);
+    ctx.fillStyle = '#26180f';
     ctx.fill();
-    // shelf board + lip rail at the compartment bottom
-    const lipY = Math.round(ART_PILOT.lips[lr][1] * k);
-    ctx.fillStyle = '#8a5a3b';
-    rr(ctx, left, lipY, right - left, Math.round(48 * k), 4); ctx.fill();
-    ctx.fillStyle = 'rgba(255,235,200,0.22)';
-    ctx.fillRect(left + 2, lipY + 2, right - left - 4, 3);
-    // empty-slot hints at the 8 slot centers
-    ctx.strokeStyle = 'rgba(255,235,200,0.10)';
-    ctx.lineWidth = 1.4;
-    for (let s = 0; s < 8; s++) {
-      const cx = Math.round((ART_PILOT.slotSpan[0] + (s * (ART_PILOT.slotSpan[1] - ART_PILOT.slotSpan[0])) / 7) * k);
-      rr(ctx, cx - 10, top + 8, 20, bottom - top - 16, 3);
+    const grad = ctx.createLinearGradient(0, top + 6, 0, top + h - 2);
+    grad.addColorStop(0, 'rgba(0,0,0,0.46)');
+    grad.addColorStop(0.45, 'rgba(0,0,0,0.12)');
+    grad.addColorStop(1, 'rgba(0,0,0,0.04)');
+    rr(ctx, chX0 - 4, top + 6, chX1 - chX0 + 8, h - 8, 5);
+    ctx.fillStyle = grad; ctx.fill();
+    // empty-slot hints
+    ctx.strokeStyle = 'rgba(255,235,200,0.09)';
+    ctx.lineWidth = 1.5;
+    for (let k = 0; k < 8; k++) {
+      const cx = (SLOT0_X + k * SLOT_PITCH) * 2;
+      rr(ctx, cx - 10, top + 8, 20, h - 12, 3);
       ctx.stroke();
+    }
+    // north wall + highlight
+    ctx.fillStyle = '#91603c';
+    rr(ctx, chX0 - 6, top, chX1 - chX0 + 12, 7, 3); ctx.fill();
+    ctx.fillStyle = 'rgba(255,235,200,0.28)';
+    rr(ctx, chX0 - 4, top + 1, chX1 - chX0 + 8, 2.5, 1); ctx.fill();
+    // dividers
+    for (let k = 1; k < 8; k++) {
+      const dx = (SLOT0_X + k * SLOT_PITCH) * 2 - SLOT_PITCH;
+      ctx.fillStyle = '#825430';
+      rr(ctx, dx - 4, top + 4, 8, h - 6, 3); ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,0.32)';
+      ctx.fillRect(dx + 2, top + 4, 1.5, h - 6);
+      ctx.fillStyle = 'rgba(255,235,200,0.12)';
+      ctx.fillRect(dx - 3, top + 5, 1.5, h - 8);
+    }
+    // channel end walls
+    for (const ex of [chX0 - 12, chX1 + 2]) {
+      ctx.fillStyle = '#825430';
+      rr(ctx, ex, top + 4, 10, h - 6, 3); ctx.fill();
+    }
+  }
+  finish(scene, key);
+}
+
+/**
+ * v4 foreground lip overlay: each channel's south wall with divider front
+ * caps, drawn ABOVE the seated spines so a sliding tape disappears behind the
+ * wood. Same geometry as the legacy lips. 480x368 @2x.
+ */
+export function bakeCabinetLips(scene: Phaser.Scene): void {
+  const key = 'unit-lips';
+  const W = 480, H = 368;
+  const ctx = canvasTex(scene, key, W, H);
+  const chX0 = 82, chX1 = 452;
+  for (let lr = 0; lr < 4; lr++) {
+    const top = (ROW_CH_TOP + lr * ROW_PITCH) * 2;
+    const bottom = top + ROW_CH_H * 2;
+    const ly = bottom - 8;
+    // under-shadow so the lip separates from the body
+    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    rr(ctx, chX0 - 8, ly + 10, chX1 - chX0 + 16, 8, 4); ctx.fill();
+    ctx.fillStyle = '#91603c';
+    rr(ctx, chX0 - 8, ly, chX1 - chX0 + 16, 16, 4);
+    ctx.fill();
+    ctx.strokeStyle = '#54331d'; ctx.lineWidth = 2;
+    rr(ctx, chX0 - 8, ly, chX1 - chX0 + 16, 16, 4);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,235,200,0.32)';
+    rr(ctx, chX0 - 6, ly + 1, chX1 - chX0 + 12, 3, 1.5); ctx.fill();
+    for (let k = 1; k < 8; k++) {
+      const dx = (SLOT0_X + k * SLOT_PITCH) * 2 - SLOT_PITCH;
+      ctx.fillStyle = '#7b4e2e';
+      rr(ctx, dx - 5, ly + 3, 10, 10, 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,235,200,0.14)';
+      ctx.fillRect(dx - 4, ly + 4, 8, 1.6);
     }
   }
   finish(scene, key);
@@ -748,7 +876,9 @@ export function buildAllTextures(scene: Phaser.Scene): void {
   buildSymbolStickers(scene);
   buildUnitBody(scene);
   buildUnitLips(scene);
-  buildPlainPilotCabinet(scene);
+  bakeWoodTable(scene);
+  bakeCabinetBody(scene);
+  bakeCabinetLips(scene);
   for (let combo = 0; combo < COLORS.length * SYMBOLS.length; combo++) {
     buildTapeFace(scene, combo);
     buildSpine(scene, combo);

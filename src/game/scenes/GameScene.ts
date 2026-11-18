@@ -1,10 +1,10 @@
 import Phaser from 'phaser';
 import {
-  ART_PILOT, BENCH, COLORS, RETURN_FROM, RETURN_SPOT, ROWS_PER_UNIT,
-  ROW_PULSE_MS, SKILL_THRESHOLDS, SYMBOLS, UNITS,
+  BENCH, COLORS, RETURN_FROM, RETURN_SPOT, ROWS_PER_UNIT,
+  ROW_PULSE_MS, SKILL_THRESHOLDS, SYMBOLS, TABLE_LIGHT, UNITS,
   WORLD_H, WORLD_W, ZOOM_MAX, ZOOM_MIN, benchRect, rowRect, slotPos, trayScreenRect,
   unitOfRow, unitPos, unitRect, groupOfRow, rowsOfGroup, ROW_CH_TOP, ROW_PITCH, ROW_CH_H,
-  UNIT_W, UNIT_H, isPilotUnit,
+  UNIT_W, UNIT_H,
 } from '../config';
 import { defectBlocksFiling } from '../types';
 import type { Row, Tape, WorldData, SkillId, SaveSettings } from '../types';
@@ -60,12 +60,8 @@ export class GameScene extends Phaser.Scene {
   milestoneCounters = { rows: 0, cabinets: 0 };
   lastMilestone = { kind: 'none' as 'none' | 'row' | 'cabinet', row: -1, unit: -1, at: 0 };
   returningTape = false;                   // repair return in flight (no autosave)
-  pilotViews: {
-    body: Phaser.GameObjects.Image;
-    lips: Phaser.GameObjects.Image[];      // atlas foreground lips (art mode)
-    plainLips: Phaser.GameObjects.Graphics[]; // plain wood rails (before mode)
-    atlasLamp: Phaser.GameObjects.Image | null;
-  } | null = null;
+  /** per-unit art images the settings toggle re-textures (v4 full board) */
+  unitArt: { body: Phaser.GameObjects.Image; lips: Phaser.GameObjects.Image[] }[] = [];
   private override: { seed?: number; fresh?: boolean; carry?: boolean } | null = null;
   private saveTimer = 0;
   keys!: Record<string, Phaser.Input.Keyboard.Key>;
@@ -98,7 +94,7 @@ export class GameScene extends Phaser.Scene {
     this.milestoneCounters = { rows: 0, cabinets: 0 };
     this.lastMilestone = { kind: 'none', row: -1, unit: -1, at: 0 };
     this.returningTape = false;
-    this.pilotViews = null;
+    this.unitArt = [];
     this.rowPulseGfx = null;
   }
 
@@ -162,10 +158,7 @@ export class GameScene extends Phaser.Scene {
   // ------------------------------------------------------------- world visuals
   private buildWorldVisuals(): void {
     const table = this.add.tileSprite(0, 0, WORLD_W, WORLD_H, 'wood');
-    table.setOrigin(0, 0).setDepth(0);
-
-    // walnut inlay wing (pilot corner surface) + seams, under everything else
-    this.buildPilotSurface();
+    table.setOrigin(0, 0).setDepth(0).setName('table-tilesprite');
 
     // warm table edge with a front-face band (south) + darker side bands
     const edges = this.add.graphics().setDepth(1);
@@ -203,10 +196,9 @@ export class GameScene extends Phaser.Scene {
     this.add.image(2540, 1660, 'prop-plant').setDepth(3).setScale(0.85);
     this.add.image(560, 1650, 'prop-books').setDepth(3).setScale(0.9);
 
-    // rack units (layered: body < chips/counts < seated spines < lips)
+    // rack units (layered: shadow < body < chips/counts < seated spines < lips)
     for (let u = 0; u < UNITS; u++) {
-      if (isPilotUnit(u)) this.buildPilotUnit(u);
-      else this.buildFallbackUnit(u);
+      this.buildUnit(u);
     }
 
     // tapes
@@ -226,12 +218,17 @@ export class GameScene extends Phaser.Scene {
     this.buildLighting();
   }
 
-  private buildFallbackUnit(u: number): void {
+  /** one compact cabinet family for every unit (v4): shadow/body/chips/lips */
+  private buildUnit(u: number): void {
     const p = unitPos(u);
+    // soft ground shadow under the whole cabinet
+    const shadow = this.add.image(p.x + UNIT_W / 2 + 10, p.y + UNIT_H / 2 + 8, 'contact-shadow');
+    shadow.setDisplaySize(UNIT_W * 1.22, UNIT_H * 1.12).setDepth(p.y - 0.6).setAlpha(0.34);
     const body = this.add.image(p.x + UNIT_W / 2, p.y + UNIT_H / 2, 'unit-body');
     body.setDisplaySize(UNIT_W, UNIT_H).setDepth(p.y);
     const lips = this.add.image(p.x + UNIT_W / 2, p.y + UNIT_H / 2, 'unit-lips');
     lips.setDisplaySize(UNIT_W, UNIT_H).setDepth(p.y + 2);
+    this.unitArt.push({ body, lips: [lips] });
     const chips: Phaser.GameObjects.Image[] = [];
     const counts: Phaser.GameObjects.Text[] = [];
     this.attachRowLabels(u, (lr) => p.x + 24, (lr) => p.y + ROW_CH_TOP + lr * ROW_PITCH + ROW_CH_H / 2, () => p.x + UNIT_W - 10, chips, counts);
@@ -266,108 +263,25 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** the walnut art-pilot cabinet (unit 12): body behind tapes, 4 lips in front */
-  private buildPilotUnit(u: number): void {
-    const rect = unitRect(u);
-    const k = ART_PILOT.cabScale;
-    const depth = rect.y;
-    const useArt = artState.pilotArt && this.textures.exists('tt-cabinet');
-
-    // big soft contact shadow under the cabinet
-    const shadow = this.add.image(rect.x + rect.w / 2 + 14, rect.y + rect.h / 2 + 16, 'contact-shadow');
-    shadow.setDisplaySize(rect.w * 1.16, rect.h * 1.1).setDepth(depth - 0.6)
-      .setAlpha(ART_PILOT.light.contactShadowAlpha);
-
-    const body = this.add.image(rect.x, rect.y, useArt ? 'tt-cabinet' : 'walnut-plain', useArt ? 'body' : undefined);
-    body.setOrigin(0, 0).setDisplaySize(rect.w, rect.h).setDepth(depth);
-
-    // four foreground lips at the supplied art offsets, same scale as the body;
-    // in "before" mode simple wood rails take over so occlusion still works
-    const lips: Phaser.GameObjects.Image[] = [];
-    const plainLips: Phaser.GameObjects.Graphics[] = [];
-    if (useArt) {
-      for (let lr = 0; lr < ROWS_PER_UNIT; lr++) {
-        const [lx, ly] = ART_PILOT.lips[lr];
-        const lip = this.add.image(rect.x + lx * k, rect.y + ly * k, 'tt-cabinet', `lip-${lr + 1}`);
-        lip.setOrigin(0, 0).setDisplaySize(678 * k, 48 * k).setDepth(depth + 2 + lr * 0.03);
-        lips.push(lip);
-      }
-    } else {
-      for (let lr = 0; lr < ROWS_PER_UNIT; lr++) {
-        const [lx, ly] = ART_PILOT.lips[lr];
-        const g = this.add.graphics().setDepth(depth + 2 + lr * 0.03);
-        g.fillStyle(0x7a4f30, 1);
-        g.fillRoundedRect(rect.x + lx * k, rect.y + ly * k, 678 * k, 48 * k, 4);
-        g.fillStyle(0xb9855a, 1);
-        g.fillRect(rect.x + lx * k, rect.y + ly * k + 2, 678 * k, 3);
-        plainLips.push(g);
-      }
-    }
-
-    // row labels sit beside the cabinet's left edge (on the inlay), counts at right
-    const chips: Phaser.GameObjects.Image[] = [];
-    const counts: Phaser.GameObjects.Text[] = [];
-    this.attachRowLabels(
-      u,
-      () => rect.x - 36,
-      (lr) => rect.y + ART_PILOT.seats[lr] * k - 20,
-      () => rect.x + rect.w - 14,
-      chips, counts,
-    );
-
-    const verify = this.add.text(rect.x + rect.w - 26, rect.y + 18, '✓?', {
-      fontFamily: 'Georgia, serif', fontSize: '15px', fontStyle: 'bold', color: '#ffe9a8',
-      backgroundColor: '#5a3520', padding: { x: 6, y: 2 },
-    }).setOrigin(0.5).setDepth(depth + 0.5).setInteractive({ useHandCursor: true });
-    verify.on('pointerdown', () => { audio.unlock(); this.verifyUnit(u); });
-
-    this.unitViews.set(u, { unit: u, body, lips, chips, counts, verify });
-    this.pilotViews = { body, lips, plainLips, atlasLamp: null };
-  }
-
-  /** walnut-tile inlay wing + painted seams + rim trim on the exposed edges */
-  private buildPilotSurface(): void {
-    const { x0, y0, x1, y1 } = ART_PILOT.inlay;
-    if (this.textures.exists('walnut-tile')) {
-      const inlay = this.add.tileSprite(x0, y0, x1 - x0, y1 - y0, 'walnut-tile');
-      inlay.setOrigin(0, 0).setDepth(0.5);
-      // painted seams (dark joint + warm highlight) so the patch reads intentional
-      const seam = this.add.graphics().setDepth(0.7);
-      seam.lineStyle(5, 0x3a2314, 0.65);
-      seam.strokeRect(x0, y0, x1 - x0, y1 - y0);
-      seam.lineStyle(1.6, 0xd9b98a, 0.25);
-      seam.strokeRect(x0 + 4, y0 + 4, x1 - x0 - 8, y1 - y0 - 8);
-      // wooden rim along the exposed table edges of this wing (top + right)
-      if (this.textures.exists('tt-rim')) {
-        const rimW = x1 - x0;
-        const rimTop = this.add.image(x0 + rimW / 2, 8, 'tt-rim', 'rim');
-        rimTop.setDisplaySize(rimW - 10, 40).setDepth(0.8);
-        const rimRight = this.add.image(WORLD_W - 8, y0 + (y1 - y0) / 2, 'tt-rim', 'rim');
-        rimRight.setDisplaySize(y1 - y0 - 10, 40).setRotation(Math.PI / 2).setDepth(0.8);
-      }
-    }
-  }
-
-  /** world-space lighting: ambient fill, warm falloff from the lamp, lamp pool/halo */
+  /**
+   * Board-wide lighting (v4): one warm environment for the whole table —
+   * quiet ambient fill, a broad warm key from the lamp area, gentle distance
+   * vignette, and the lamp's local pool/halo. All layers are world-space
+   * (pan/zoom stable) above the world and held tapes, below fx/HUD.
+   */
   private buildLighting(): void {
-    const L = ART_PILOT.light;
-    const lamp = ART_PILOT.lamp;
+    const L = TABLE_LIGHT.light;
+    const lamp = TABLE_LIGHT.lamp;
     const bulb = {
       x: lamp.x + 0.66 * lamp.w,
       y: lamp.y + 0.46 * lamp.h,
     };
     const lightDepth = 139000; // above world objects + held tapes, below fx/HUD
 
-    // brass lamp prop (art toggle aware): atlas lamp in pilot mode, fallback prop otherwise
-    const useArt = artState.pilotArt && this.textures.exists('tt-lamp');
-    const lampImg = this.add.image(lamp.x, lamp.y, useArt ? 'tt-lamp' : 'prop-lamp', useArt ? 'lamp' : undefined);
-    if (useArt) {
-      lampImg.setOrigin(0, 0).setDisplaySize(lamp.w, lamp.h);
-    } else {
-      lampImg.setOrigin(0.5, 0.8).setPosition(lamp.x + lamp.w / 2, lamp.y + lamp.h).setScale(1.1);
-    }
+    // brass lamp prop at its table spot
+    const lampImg = this.add.image(lamp.x, lamp.y, 'prop-lamp');
+    lampImg.setOrigin(0.5, 0.8).setPosition(lamp.x + lamp.w / 2, lamp.y + lamp.h).setScale(1.1);
     lampImg.setDepth(lamp.y + lamp.h - 6);
-    if (this.pilotViews) this.pilotViews.atlasLamp = useArt ? lampImg : null;
     const lampShadow = this.add.image(lamp.x + lamp.w * 0.35 + 10, lamp.y + lamp.h - 8, 'contact-shadow');
     lampShadow.setDisplaySize(120, 52).setAlpha(0.4).setDepth(lamp.y + lamp.h - 6.2);
 
@@ -380,7 +294,8 @@ export class GameScene extends Phaser.Scene {
     ambient.setDisplaySize(WORLD_W, WORLD_H).setDepth(lightDepth)
       .setAlpha(L.ambientAlpha).setBlendMode(Phaser.BlendModes.NORMAL);
 
-    // restrained world-space warm falloff around the lamp (restrained additive)
+    // broad warm key centered on the lamp — reaches most of the table so the
+    // scene feels naturally lit even in the far corners
     this.ensureTexture('light-warm', (ctx, S) => {
       const g = ctx.createRadialGradient(S / 2, S / 2, S * 0.02, S / 2, S / 2, S / 2);
       g.addColorStop(0, 'rgba(255,214,150,0.55)');
@@ -390,10 +305,10 @@ export class GameScene extends Phaser.Scene {
       ctx.fillRect(0, 0, S, S);
     });
     const falloff = this.add.image(bulb.x, bulb.y, 'light-warm');
-    falloff.setDisplaySize(2100, 1700).setDepth(lightDepth + 1)
+    falloff.setDisplaySize(3400, 2700).setDepth(lightDepth + 1)
       .setAlpha(L.falloffAlpha).setBlendMode(Phaser.BlendModes.ADD);
 
-    // distance falloff: gentle darkening away from the lamp (world-anchored)
+    // gentle world-anchored darkening toward the far edges/corners
     this.ensureTexture('light-far', (ctx, S) => {
       const g = ctx.createRadialGradient(S / 2, S / 2, S * 0.28, S / 2, S / 2, S / 2);
       g.addColorStop(0, 'rgba(20,10,6,0)');
@@ -402,8 +317,8 @@ export class GameScene extends Phaser.Scene {
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, S, S);
     });
-    const far = this.add.image(bulb.x, bulb.y, 'light-far');
-    far.setDisplaySize(3600, 2800).setDepth(lightDepth + 1)
+    const far = this.add.image(WORLD_W / 2, WORLD_H / 2, 'light-far');
+    far.setDisplaySize(WORLD_W * 1.3, WORLD_H * 1.3).setDepth(lightDepth + 1)
       .setAlpha(L.cornerVignetteAlpha).setBlendMode(Phaser.BlendModes.NORMAL);
 
     // amber pool just down-and-right of the shade + small bulb halo
@@ -1014,26 +929,29 @@ export class GameScene extends Phaser.Scene {
     this.game.events.emit('settings:changed', { ...this.settings });
   }
 
-  /** runtime art-pilot toggle: same geometry, only the corner's textures swap */
+  /**
+   * v4 art-family toggle: same geometry everywhere, only pixels swap. The
+   * cabinet bodies/lips and the table wood swap texture families directly;
+   * every tape is re-posed (loose faces + seated spines pick their family via
+   * the pose specs). Tray tapes are hidden world-views — nothing to do.
+   */
   setPilotArt(on: boolean): void {
-    if (!this.pilotViews) return;
-    const rect = unitRect(ART_PILOT.unit);
-    const useArt = on && this.textures.exists('tt-cabinet');
-    this.pilotViews.body.setTexture(useArt ? 'tt-cabinet' : 'walnut-plain', useArt ? 'body' : undefined);
-    this.pilotViews.body.setOrigin(0, 0).setDisplaySize(rect.w, rect.h);
-    for (const lip of this.pilotViews.lips) lip.setVisible(useArt);
-    for (const g of this.pilotViews.plainLips) g.setVisible(!useArt);
-    if (this.pilotViews.atlasLamp) {
-      this.pilotViews.atlasLamp.setVisible(useArt);
+    const legacyWood = on === false && this.textures.exists('legacy-wood');
+    const table = this.children.getByName('table-tilesprite') as Phaser.GameObjects.TileSprite | null;
+    if (table && legacyWood) table.setTexture('legacy-wood');
+    else if (table) table.setTexture('wood');
+    for (const ua of this.unitArt) {
+      ua.body.setTexture(on ? 'unit-body' : 'legacy-unit-body');
+      for (const lip of ua.lips) lip.setTexture(on ? 'unit-lips' : 'legacy-unit-lips');
     }
-    // re-pose the pilot combo's tapes (loose faces + walnut seated spines)
+    // re-pose EVERY tape (both modes share sizes; only textures swap)
     for (const view of this.tapeViews.values()) {
       const t = this.tapeData(view.id);
-      if (!t || t.combo !== ART_PILOT.combo) continue;
+      if (!t) continue;
       if (t.state === 'loose') {
         setLoosePose(this, view, t);
         view.container.setRotation(t.rot);
-      } else if (t.state === 'shelved' && isPilotUnit(unitOfRow(t.row as number))) {
+      } else if (t.state === 'shelved') {
         setSeatedPose(this, view, t, unitOfRow(t.row as number));
       }
     }
