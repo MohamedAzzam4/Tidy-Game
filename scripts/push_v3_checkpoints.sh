@@ -38,10 +38,12 @@ fi
 echo "token verified (HTTP 200)"
 
 # 3) push the checkpoints, each on its own branch
-PLANNING=$(git rev-parse --short efd7225)   # v3 planning: spec/plan/tasks/review
-FIXES=$(git rev-parse --short 4efcd6f)      # v3 playtest fixes: full playable build
+#    v3-planning = efd7225 (spec/plan/tasks/review)
+#    v3-fixes    = HEAD    (playtest fixes build; includes this helper)
+PLANNING=$(git rev-parse --short efd7225)
+FIXES=$(git rev-parse --short HEAD)
 echo "pushing v3-planning ($PLANNING) and v3-fixes ($FIXES)..."
-git push "$REPO" efd7225:refs/heads/v3-planning 4efcd6f:refs/heads/v3-fixes 2>&1 \
+git push "$REPO" efd7225:refs/heads/v3-planning HEAD:refs/heads/v3-fixes 2>&1 \
   | sed -E 's#github_pat_[A-Za-z0-9_]+#[TOKEN]#g'
 
 # 4) confirm both branches landed
