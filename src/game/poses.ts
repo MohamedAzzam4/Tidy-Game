@@ -1,5 +1,5 @@
 /**
- * Tidy Tapes — canonical pose system (v3 §1).
+ * Tidy Tapes — canonical pose system (v3 §1, globalized in v4).
  *
  * Every cassette view state has an EXPLICIT pose spec (texture, frame, display
  * size, origin, hit area). Transitions between poses never derive anything from
@@ -10,17 +10,19 @@
  * extraction, so three insert/remove cycles, extraction from any rack, and any
  * zoom level all end with the same resting size.
  *
- * Two art families share this system:
- *  - procedural fallback (tape-face-N / spine-N) for all combos, and
- *  - the uploaded teal-star atlas (loose / turn / spine frames) for the art
- *    pilot combo when it sits in the walnut cabinet (other rows of that cabinet
- *    keep fallback spines at the taller pilot display size).
+ * v4 full-board rollout: ONE cassette template serves every combo in the new
+ * art mode (canonical keys `tape-face-N` / `tape-turn-N` / `spine-N`); the
+ * pre-rollout look stays available under `legacy-*` keys behind the settings
+ * toggle. GEOMETRY IS IDENTICAL IN BOTH MODES — display sizes, origins and hit
+ * areas below never depend on the toggle; only the pixels swap. The old
+ * per-corner pilot atlas and its geometry special cases are retired.
  */
 import Phaser from 'phaser';
-import {
-  ART_PILOT, SPINE_H, SPINE_W, SYMBOLS, isPilotUnit, unitOfRow,
-} from './config';
+import { SPINE_H, SPINE_W, SYMBOLS, unitOfRow } from './config';
 import { artState } from './artState';
+import {
+  CASSETTE_LOOSE_DISPLAY, CASSETTE_TURN_DISPLAY, CASSETTE_TURN_ORIGIN,
+} from './cassetteArt';
 import type { Tape } from './types';
 import type { TapeView } from './scenes/GameScene';
 
@@ -32,63 +34,38 @@ export interface PoseSpec {
   origin: [number, number];
 }
 
-/** texture keys of the uploaded atlas */
-export const PILOT_ATLAS = 'tt-cassette';
-
-export function pilotCombo(): number { return ART_PILOT.combo; }
-export function usesPilotLooseArt(combo: number): boolean {
-  return artState.pilotArt && combo === ART_PILOT.combo;
-}
-export function usesPilotSpineArt(combo: number, unit: number): boolean {
-  return artState.pilotArt && combo === ART_PILOT.combo && isPilotUnit(unit);
-}
-
 /** broad face up on the table (canonical loose size = existing footprint) */
 export function looseSpec(combo: number): PoseSpec {
-  if (usesPilotLooseArt(combo)) {
-    return {
-      texture: PILOT_ATLAS, frame: 'loose',
-      w: ART_PILOT.poses.loose.w, h: ART_PILOT.poses.loose.h,
-      origin: [...ART_PILOT.anchors.loose] as [number, number],
-    };
-  }
-  return { texture: `tape-face-${combo}`, w: 104, h: 72, origin: [0.5, 0.5] };
-}
-
-/** edge-on seated spine; taller inside the walnut cabinet (per-cabinet pose) */
-export function spineSpec(combo: number, unit: number): PoseSpec {
-  if (isPilotUnit(unit)) {
-    if (usesPilotSpineArt(combo, unit)) {
-      return {
-        texture: PILOT_ATLAS, frame: 'spine',
-        w: ART_PILOT.poses.spine.w, h: ART_PILOT.poses.spine.h,
-        origin: [...ART_PILOT.anchors.spine] as [number, number],
-      };
-    }
-    // fallback spines inside the walnut read at the compartment scale
-    const s = ART_PILOT.fallbackSpineInPilot;
-    return { texture: `spine-${combo}`, w: s.w, h: s.h, origin: [0.5, 0.973] };
-  }
-  return { texture: `spine-${combo}`, w: SPINE_W, h: SPINE_H, origin: [0.5, 0.5] };
-}
-
-/** mid-insertion pose (pilot art only; fallback crossfades face→spine instead) */
-export function turnSpec(combo: number): PoseSpec | null {
-  if (!usesPilotLooseArt(combo)) return null;
   return {
-    texture: PILOT_ATLAS, frame: 'turn',
-    w: ART_PILOT.poses.turn.w, h: ART_PILOT.poses.turn.h,
-    origin: [...ART_PILOT.anchors.turn] as [number, number],
+    texture: artState.pilotArt ? `tape-face-${combo}` : `legacy-tape-face-${combo}`,
+    w: CASSETTE_LOOSE_DISPLAY.w, h: CASSETTE_LOOSE_DISPLAY.h,
+    origin: [0.5, 0.5],
+  };
+}
+
+/** edge-on seated spine; same slot scale for every cabinet in both art modes */
+export function spineSpec(combo: number, _unit: number): PoseSpec {
+  return {
+    texture: artState.pilotArt ? `spine-${combo}` : `legacy-spine-${combo}`,
+    w: SPINE_W, h: SPINE_H,
+    origin: [0.5, 0.5],
+  };
+}
+
+/** mid-insertion pose (new art: every combo; legacy: crossfade fallback) */
+export function turnSpec(combo: number): PoseSpec | null {
+  if (!artState.pilotArt) return null;
+  return {
+    texture: `tape-turn-${combo}`,
+    w: CASSETTE_TURN_DISPLAY.w, h: CASSETTE_TURN_DISPLAY.h,
+    origin: [...CASSETTE_TURN_ORIGIN] as [number, number],
   };
 }
 
 /** loose hit area (identical for every combo — grabbing is never art-dependent) */
 export const LOOSE_HIT = { w: 92, h: 60 };
-/** seated hit strip height per cabinet family */
-export function seatedHit(unit: number): { w: number; h: number } {
-  if (isPilotUnit(unit)) {
-    return { w: Math.max(20, SPINE_W + 6), h: 64 };
-  }
+/** seated hit strip (same in every cabinet family since v4) */
+export function seatedHit(_unit: number): { w: number; h: number } {
   return { w: SPINE_W, h: SPINE_H };
 }
 

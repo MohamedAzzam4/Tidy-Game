@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { buildAllTextures } from '../textures';
+import { bakeAllCassettes } from '../cassetteArt';
 import { audio } from '../audio';
 
 /**
@@ -34,6 +35,7 @@ export class BootScene extends Phaser.Scene {
 
   create(): void {
     buildAllTextures(this);
+    bakeAllCassettes(this); // v4 full-board cassette template (canonical keys)
     audio.unlock(); // best-effort; real unlock happens on first gesture
     // v1 bug fixed here: the HUD scene was never started, so the game shipped
     // without its top bar, chips, tray or panels. Launch Game AND UI together.

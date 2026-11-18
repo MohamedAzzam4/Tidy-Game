@@ -60,11 +60,12 @@ function contactShadow(ctx: CanvasRenderingContext2D, cx: number, cy: number, rx
 }
 
 // ---------------------------------------------------------------- tape faces
-/** Broad face of a loose cassette (with baked contact shadow + bottom/side shading). */
+/** Broad face of a loose cassette (with baked contact shadow + bottom/side shading).
+ *  v4: pre-rollout look, kept under legacy-* for the before/after comparator. */
 export function buildTapeFace(scene: Phaser.Scene, combo: number): void {
   const color = COLORS[Math.floor(combo / SYMBOLS.length)];
   const symbol = SYMBOLS[combo % SYMBOLS.length];
-  const key = `tape-face-${combo}`;
+  const key = `legacy-tape-face-${combo}`;
   const W = 208, H = 144; // 2x of (104x72) display; shell is 184x120 centered
   const ctx = canvasTex(scene, key, W, H);
   const OX = 12, OY = 12;
@@ -210,11 +211,12 @@ export function buildDefectOverlay(scene: Phaser.Scene, kind: 'rewind' | 'sticke
 }
 
 // ---------------------------------------------------------------------- spines
-/** Seated cassette: narrow vertical bar (edge-on, like a book spine). 32x56 @2x. */
+/** Seated cassette: narrow vertical bar (edge-on, like a book spine). 32x56 @2x.
+ *  v4: pre-rollout look, kept under legacy-* for the before/after comparator. */
 export function buildSpine(scene: Phaser.Scene, combo: number): void {
   const color = COLORS[Math.floor(combo / SYMBOLS.length)];
   const symbol = SYMBOLS[combo % SYMBOLS.length];
-  const key = `spine-${combo}`;
+  const key = `legacy-spine-${combo}`;
   const W = 32, H = 56;
   const ctx = canvasTex(scene, key, W, H);
   rr(ctx, 1, 1, W - 2, H - 2, 4);

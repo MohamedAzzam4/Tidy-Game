@@ -25,7 +25,7 @@ import {
   CLICK_MOVE_THRESHOLD, DEFERRED_CLICK_MS, DOUBLE_CLICK_MS, INSERT_ALIGN_MS,
   INSERT_SLIDE_MS, INSERT_STAGGER_MS, INSERT_TURN_MS,
   UNITS, UNIT_H, UNIT_W, benchRect, rowRect, slotPos,
-  trayScreenRect, unitOfRow, unitPos, isPilotUnit,
+  trayScreenRect, unitOfRow, unitPos,
 } from '../config';
 import { defectBlocksFiling } from '../types';
 import { audio } from '../audio';
@@ -198,11 +198,8 @@ export class DragController {
       const t = this.scene.tapeData(view.id) as Tape;
       if (t.state !== 'shelved') continue;
       const c = view.container;
-      const u = unitOfRow(t.row as number);
-      if (isPilotUnit(u)) {
-        // taller visible spine above the seat point
-        if (Math.abs(x - c.x) <= 12 && y >= c.y - 68 && y <= c.y + 6) return view;
-      } else if (Math.abs(x - c.x) <= 13 && Math.abs(y - c.y) <= 19) {
+      // v4: one compact cabinet family — one hit strip for every unit
+      if (Math.abs(x - c.x) <= 13 && Math.abs(y - c.y) <= 19) {
         return view;
       }
     }
@@ -503,13 +500,12 @@ export class DragController {
     }
     const p = slotPos(rowId, slot);
     const u = unitOfRow(rowId);
-    const pilot = isPilotUnit(u);
-    const spec = spineSpec(0, u); // size template for this cabinet family
+    const spec = spineSpec(0, u); // size template (same for every cabinet since v4)
     this.hoverGlow.clear().setVisible(true);
     this.hoverGlow.lineStyle(2.5, 0xf6efdd, 0.95);
     this.hoverGlow.fillStyle(0xf6efdd, 0.12);
-    const gy = pilot ? p.y - spec.h - 3 : p.y - spec.h / 2 - 3;
-    const gh = spec.h + (pilot ? 8 : 6);
+    const gy = p.y - spec.h / 2 - 3;
+    const gh = spec.h + 6;
     this.hoverGlow.fillRoundedRect(p.x - spec.w / 2 - 2, gy, spec.w + 4, gh, 4);
     this.hoverGlow.strokeRoundedRect(p.x - spec.w / 2 - 2, gy, spec.w + 4, gh, 4);
     const leadTape = this.held ? this.scene.tapeData(this.held.lead.id) as Tape : null;
@@ -747,8 +743,8 @@ export class DragController {
     const c = view.container;
     const loose = looseSpec(tape.combo);
     const spine = spineSpec(tape.combo, u);
-    const turn = isPilotUnit(u) ? turnSpec(tape.combo) : null;
-    const standOff = isPilotUnit(u) ? 44 : 40;
+    const turn = turnSpec(tape.combo); // v4: mid-turn art for EVERY unit (null in legacy mode)
+    const standOff = 40;
 
     scene.time.delayedCall(delayMs, () => {
       if (view.overlay) view.overlay.setVisible(false);
